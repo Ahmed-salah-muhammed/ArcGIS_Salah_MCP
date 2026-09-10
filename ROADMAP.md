@@ -50,8 +50,8 @@ Legend: ✅ done · 🟡 partial / stub · ⬜ planned
 
 ## Phase 4 — Live .NET bridge (like the QGIS "live" mode)
 - ✅ ArcGIS Pro SDK for .NET add-in running inside the open session
-  (`ProSalahBridge/`): `BridgeServer` (loopback HttpListener, no token, JSON
-  envelope, routing) + autoLoad `Module1` + a **6-button Salah MCP** ribbon
+  (`SalahAIBridge/`): `BridgeServer` (loopback HttpListener, no token, JSON
+  envelope, routing) + autoLoad `Module1` + a **7-button Salah MCP** ribbon
   (Start Server, Ping, Publish, Create Web App, Create Dashboard, Deploy Web App;
   add-in **v0.1.2**, Calcite/Octicons icons, hideable progress windows). Targets
   ArcGIS Pro 3.x / .NET 10.

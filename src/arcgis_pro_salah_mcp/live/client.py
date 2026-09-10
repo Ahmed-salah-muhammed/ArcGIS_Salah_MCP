@@ -1,7 +1,7 @@
 """HTTP client for the live ArcGIS Pro bridge (Layer 1b).
 
 The bridge is a .NET add-in running INSIDE an open ArcGIS Pro session (see
-``ProSalahBridge/`` and ``docs/PROTOCOL.md``). This module is a thin, dependency-
+``SalahAIBridge/`` and ``docs/PROTOCOL.md``). This module is a thin, dependency-
 free client (Python stdlib ``urllib`` only — no new deps) that speaks the same
 ``{"ok": ...}`` envelope as the rest of the system. Loopback-only, no token.
 

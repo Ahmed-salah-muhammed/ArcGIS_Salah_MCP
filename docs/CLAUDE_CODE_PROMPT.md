@@ -2,7 +2,7 @@
 
 > **HISTORICAL (kept for reference).** This is the original prompt used to kick
 > off the live bridge. The project has since moved on: the add-in lives in
-> **`ProSalahBridge/`** (not `live-bridge/`), the bridge is **loopback-only with
+> **`SalahAIBridge/`** (not `live-bridge/`), the bridge is **loopback-only with
 > no token**, the default port is **2026**, and the ribbon is the 4-button
 > **Salah MCP** tab (Start Server · Ping · Publish · Create Web App). For the
 > current contract see `docs/PROTOCOL.md` and `CLAUDE.md` — ignore the token /
@@ -63,9 +63,9 @@ PART 1 — Python side (you can fully build and test this):
 
 PART 2 — .NET add-in source (scaffold the files; I will build them in
 Visual Studio 2026):
-Create under live-bridge/ProSalahBridge/ , targeting net10.0-windows for
+Create under live-bridge/SalahAIBridge/ , targeting net10.0-windows for
 ArcGIS Pro 3.7 (.NET 10):
-  - ProSalahBridge.csproj  (TargetFramework net10.0-windows; references to
+  - SalahAIBridge.csproj  (TargetFramework net10.0-windows; references to
     ArcGIS.Desktop.Framework / ArcGIS.Core as Esri Pro SDK assemblies;
     add-in output)
   - Config.daml            (AddInInfo + a Module; optional ribbon button to

@@ -141,8 +141,8 @@ CIM objects off the MCT.
 
 ### 5.3 Skeleton (C#)
 ```
-ProSalahBridge/
-├── ProSalahBridge.csproj      // net10.0-windows; refs ArcGIS.Desktop.Framework, ArcGIS.Core
+SalahAIBridge/
+├── SalahAIBridge.csproj      // net10.0-windows; refs ArcGIS.Desktop.Framework, ArcGIS.Core
 ├── Config.daml                // <AddInInfo>, <modules>, the 4-button "Salah MCP" ribbon
 ├── Module1.cs                 // Module lifecycle; Initialize -> start server; Uninitialize -> stop
 ├── BridgeServer.cs            // HttpListener loop (no token), JSON (de)serialize, route to ICommand
@@ -185,7 +185,7 @@ ArcGIS-Pro_Salah_MCP/                     (repo root — already initialized)
 │   ├── live/       client.py  ops.py      Layer 1b — HTTP client → add-in  ✅
 │   ├── portal/     ops.py                 Layer 2  ✅
 │   └── webapp/     generator.py dashboard.py github.py templates  Layer 3  ✅
-├── ProSalahBridge/                       .NET 10 add-in (C#, Pro SDK, 6-button ribbon)  ✅
+├── SalahAIBridge/                       .NET 10 add-in (C#, Pro SDK, 7-button ribbon)  ✅
 ├── demos/   setup_sample.py  check_github_token.py
 ├── tests/   test_core.py
 ├── docs/    ARCHITECTURE.md  PROTOCOL.md  diagrams/
@@ -235,7 +235,7 @@ Each phase is independently shippable. Tackle top-down.
 - Add `tests/test_full_e2e.py` (needs ArcGIS Pro).
 
 **Phase B — live bridge skeleton** ⬜
-- Scaffold `live-bridge/ProSalahBridge` (.csproj, Config.daml, Module1).
+- Scaffold `live-bridge/SalahAIBridge` (.csproj, Config.daml, Module1).
 - `BridgeServer` with HttpListener, token auth, JSON envelope, `PingCommand`.
 - Python side: `live/client.py` (HTTP) + `live/ops.py` (`live_ping`) + register
   `live_ping` in `server.py`. Round-trip ping working.

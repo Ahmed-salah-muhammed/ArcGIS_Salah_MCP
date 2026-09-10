@@ -35,7 +35,7 @@ dashboard — in one conversation, or one ribbon click.
 
 | Layer | Prefix | Backend | What it does |
 | --- | --- | --- | --- |
-| **1 · Pro** | `pro_*` | ArcPy | Geoprocessing on `.aprx` projects & geodatabases (buffer, clip, symbology, export, …) |
+| **1 · Pro** | `pro_*` | ArcPy | Geoprocessing, one-call project context, geodatabase schema (domains/subtypes/attribute rules), topology validation, **GeoAI**, **Utility Network**, `.pyt` + ModelBuilder authoring |
 | **1b · Live** | `live_*` | .NET add-in (loopback HTTP) | Drive the **open** ArcGIS Pro session (list/zoom/query/run GP/export) |
 | **2 · Portal** | `portal_*` | ArcGIS API for Python | Publish layers to **ArcGIS Online / Portal**, manage items, build Web Maps |
 | **3 · WebApp** | `webapp_*` | ArcGIS Maps SDK for JS **5.0** | Generate a static **web app** *or* an interactive **dashboard**, then deploy to GitHub |
@@ -59,7 +59,7 @@ dashboard — in one conversation, or one ribbon click.
 > publishing (feature / **tile** / **vector tile**), web-map and **web-app +
 > dashboard** generation (ArcGIS Maps SDK for JS **5.0** with Calcite + map
 > components), and a one-click **GitHub deploy** are all implemented, plus a live
-> `.NET` bridge (loopback, no token) with a **6-button Salah MCP ribbon**
+> `.NET` bridge (loopback, no token) with a **7-button Salah MCP ribbon**
 > (add-in **v0.1.2**). Default portal is **ArcGIS Online**; the portal URL is
 > configurable, so **Enterprise Portal** is a small next step.
 
@@ -74,7 +74,7 @@ Esri limitation). Driving the *live* session requires a **.NET add-in** built
 with the ArcGIS Pro SDK. So this project pairs the **headless ArcPy** path
 (`pro_*`) with a **live `.NET` bridge** (`live_*`): a loopback HTTP add-in that
 runs inside the open Pro session. See
-[`ProSalahBridge/`](ProSalahBridge/) and [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+[`SalahAIBridge/`](SalahAIBridge/) and [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ---
 
@@ -107,7 +107,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 - For publishing: be **signed in** to ArcGIS Online / your portal in ArcGIS Pro.
 - For the agent workflow: an **MCP client** — **Claude Desktop** *or* **Google
   Antigravity** (or any other MCP-capable client).
-- For the ribbon buttons: build & install the **ProSalahBridge** add-in (below).
+- For the ribbon buttons: build & install the **SalahAIBridge** add-in (below).
 
 ### Step 1 — Install the package into ArcGIS Pro's Python
 
@@ -138,13 +138,13 @@ For the Portal layer, add the optional `arcgis` dependency:
 
 Build the add-in and install it so the **Salah MCP** tab appears in ArcGIS Pro:
 
-1. Open `ProSalahBridge/ProSalahBridge.slnx` in **Visual Studio 2026** (with the
+1. Open `SalahAIBridge/SalahAIBridge.slnx` in **Visual Studio 2026** (with the
    ArcGIS Pro SDK), or build from a shell:
    ```bat
-   dotnet build ProSalahBridge\ProSalahBridge.csproj
+   dotnet build SalahAIBridge\SalahAIBridge.csproj
    ```
 2. **Close ArcGIS Pro**, then double-click the built
-   `ProSalahBridge\bin\Debug\net10.0-windows\ProSalahBridge.esriAddinX`.
+   `SalahAIBridge\bin\Debug\net10.0-windows\SalahAIBridge.esriAddinX`.
 3. Reopen ArcGIS Pro → the **Salah MCP** tab is on the ribbon.
 
 > Verify the loaded build in **Project ▸ Add-In Manager** — the version should
@@ -283,10 +283,12 @@ custom Calcite panels, charts, tools and interaction logic, exactly to your spec
 
 ## The Salah MCP ribbon
 
-Once the **ProSalahBridge** add-in is installed, a **Salah MCP** tab appears on
-the ArcGIS Pro ribbon. It groups the six buttons into three task areas — **Live
+Once the **SalahAIBridge** add-in is installed, a **Salah MCP** tab appears on
+the ArcGIS Pro ribbon. It groups the seven buttons into three task areas — **Live
 Bridge**, **ArcGIS Online**, and **Web App** — so the whole *analyze → publish →
-visualize → deploy* workflow is one click away, no agent required.
+visualize → deploy* workflow is one click away, no agent required. Every button
+is always enabled: this is a local developer tool, so there is no sign-in,
+API key or licensing gate in front of the ribbon.
 
 ![The Salah MCP ribbon tab in ArcGIS Pro](docs/images/ribbon.png)
 
@@ -294,19 +296,21 @@ visualize → deploy* workflow is one click away, no agent required.
 | --- | --- | --- | --- |
 | **Start / Stop Server** | green play | Live Bridge | Start/stop the loopback bridge so `live_*` tools can reach the open session |
 | **Ping** | cyan gauge | Live Bridge | `GET /health` on the bridge and show the response |
+| **Zoom to Layer** | amber magnifier | Live Bridge | Read-only: zoom the active view to the first visible feature layer's full extent |
 | **Publish** | blue upload | ArcGIS Online | Publish chosen layers (Feature/Tile/Vector Tile) to your portal + optional Web Map |
 | **Create Web App** | orange browser | Web App | Generate a static Maps SDK for JS app and preview it on localhost |
 | **Create Dashboard** | indigo bar-chart | Web App | Generate an interactive dashboard and preview it on localhost |
 | **Deploy Web App** | GitHub mark | Web App | Push the generated folder to GitHub and (optionally) enable Pages |
 
 Icons are generated from the official [Calcite Design System](https://developers.arcgis.com/calcite-design-system/icons/)
-set (plus GitHub's Octicons for the Deploy mark) — see `ProSalahBridge/Images/make_icons.py`.
+set (plus GitHub's Octicons for the Deploy mark) — see `SalahAIBridge/Images/make_icons.py`.
+(The **Zoom to Layer** icon ships as-is and is not produced by that script.)
 
 The **Publish** and **Deploy** progress windows are minimizable / hideable (a
 **Hide** button + taskbar), so long uploads can run in the background while you
 keep working in Pro.
 
-### Live Bridge — Start Server & Ping
+### Live Bridge — Start Server, Ping & Zoom to Layer
 
 The **Start Server** button toggles the loopback HTTP bridge (port `2026`, no
 token) that runs *inside* the open Pro session. Once it's up, the `live_*` tools
@@ -322,6 +326,9 @@ geoprocessing against the map you're actually looking at.
 - **Ping** issues `GET /health` and prints the raw response — `HTTP 200 OK` with
   `{"ok":true,"data":"alive"}` means the bridge is reachable and the `live_*`
   layer is ready.
+- **Zoom to Layer** is a quick, read-only "orient yourself" action: it zooms the
+  active view to the full extent of the first visible feature layer in the map.
+  It runs entirely in-process — no bridge, no MCP round-trip needed.
 
 ### ArcGIS Online — Publish
 
@@ -436,22 +443,249 @@ You want to see **✓ CREATE OK** and **✓ PUSH OK**.
 
 ## Tools
 
-**Pro (`pro_*`):** ping, get_info, project_info, save_project, list_layers,
-add_layer, remove_layer, rename_layer, set_visibility, layer_summary,
-describe_layer, get_features, select_by_expression, add_field, calculate_field,
-field_statistics, buffer, clip, spatial_join, dissolve, merge, reproject,
-repair_geometry, extract, apply_categorized_symbology, apply_graduated_symbology,
-set_opacity, export_layer, export_image, export_pdf, export_map_series, run_gp,
-execute_code.
+**114 tools in nine groups.** Every tool's schema is sent to the model on every
+request, so `ARCGIS_SALAH_TOOLSETS` lets you keep only the groups you need — see
+[Performance](#performance).
 
-**Live (`live_*`)** — the OPEN Pro session via the .NET bridge: ping,
-list_layers, zoom_to, query, run_gp, add_layer, export_layout, get_request.
+### Core — analysis & speed (`pro_*`)
 
-**Portal (`portal_*`):** connect, whoami, publish_layer, search_items, get_item,
-create_webmap, set_layer_symbology, set_layer_labeling, share_item.
+Start with **`pro_context`**: one call returns the project, its maps, every
+layer's schema, row counts, sample rows and an inferred theme. It replaces the
+`list_layers` → `describe_layer` → `get_features` round trip that used to make
+simple questions slow.
 
-**WebApp (`webapp_*`):** create (static app), **create_dashboard** (interactive
-dashboard), **github_pipeline** (deploy to GitHub + Pages).
+| Tool | What it does |
+| --- | --- |
+| **`pro_context`** | Whole project/workspace in ONE call — start here |
+| **`pro_find_layers`** | "Which layer has population data?" without reading every schema |
+| **`pro_sql`** | Attribute query returning the matching **rows** |
+| **`pro_pipeline`** | Chain N geoprocessing tools in one call (`{{prev}}`, `{{stepN}}`) |
+| **`pro_job_submit`** / `pro_job_status` | Run long work on a worker thread, poll for the result |
+| **`pro_server_status`** | arcpy warm-up state and schema-cache hit rate |
+| **`pro_toolsets`** | Which tool groups are active |
+
+Plus the original ArcPy surface: ping, get_info, project_info, save_project,
+list_layers, add_layer, remove_layer, rename_layer, set_visibility,
+layer_summary, describe_layer, get_features, select_by_expression, add_field,
+calculate_field, field_statistics, buffer, clip, spatial_join, dissolve, merge,
+reproject, repair_geometry, extract, apply_categorized_symbology,
+apply_graduated_symbology, set_opacity, export_layer, export_image, export_pdf,
+export_map_series, run_gp, execute_code.
+
+### Schema — domains, subtypes, attribute rules (`schema` toolset)
+
+`pro_list_domains`, `pro_create_domain`, `pro_assign_domain`, `pro_delete_domain`,
+`pro_describe_subtypes`, `pro_set_subtypes`, `pro_describe_attribute_rules`,
+`pro_add_attribute_rule`, `pro_evaluate_rules`, `pro_toggle_attribute_rules`,
+`pro_delete_attribute_rule`, and **`pro_apply_schema`** — a whole schema
+(domains + subtypes + rules across many tables) applied in ONE call.
+
+### Validation — topology & geometry (`validate` toolset)
+
+`pro_topology_rules` (the 31 valid rule strings), `pro_describe_topology`,
+`pro_create_topology` (create + add classes + rules + validate in one call),
+`pro_validate_topology`, `pro_export_topology_errors`, `pro_check_geometry`, and
+**`pro_validate_all`** — "is my data clean?" answered in one call.
+
+### GeoAI — deep learning, VLMs, foundation models (`geoai` toolset)
+
+| Tool | What it does |
+| --- | --- |
+| **`pro_geoai_check_environment`** | Image Analyst licence, torch, CUDA — **call this first** |
+| **`pro_geoai_detect_by_text`** | Open-vocabulary detection from a plain-English prompt |
+| **`pro_geoai_text_to_layer`** | Prompt → detections → NMS → finished layer, one call |
+| **`pro_geoai_generate_embeddings`** | Embed imagery with a vision foundation model |
+| **`pro_geoai_find_similar`** | "More like this" — label one example, retrieve the rest |
+| **`pro_geoai_extract_with_foundation_models`** | Esri's pretrained models, infer + post-process |
+| `pro_geoai_detect_objects` | Run a trained `.dlpk` detection model |
+| `pro_geoai_classify_pixels` / `pro_geoai_classify_objects` | Segmentation / feature labelling |
+| `pro_geoai_detect_change` | Bi-temporal change detection |
+| `pro_geoai_export_training_data` / `pro_geoai_train_model` | Build and train your own model |
+| `pro_geoai_compute_accuracy` | mAP / precision / recall against ground truth |
+| `pro_geoai_train_and_detect` | Labels → chips → model → detections, one call |
+| `pro_geoai_describe_model` / `pro_geoai_model_types` | Inspect a `.dlpk`; list valid model types |
+
+### Utility Network (`unet` toolset)
+
+`pro_un_describe` (the whole model in one read), `pro_un_build` (author a network
+from one declarative spec), `pro_un_create`, `pro_un_add_domain_network`,
+`pro_un_add_tier`, `pro_un_add_rule`, `pro_un_add_network_attribute`,
+`pro_un_add_category`, `pro_un_add_terminal_configuration`, `pro_un_topology`
+(enable/disable/validate/verify/repair/analyze), `pro_un_add_trace_locations`,
+**`pro_un_trace`** (all 10 trace types), `pro_un_subnetwork`, `pro_un_trace_types`.
+
+### Toolbox authoring (`authoring` toolset)
+
+**`pro_create_python_toolbox`** writes a working `.pyt`;
+**`pro_create_model`** writes a real, editable **ModelBuilder** model into a
+`.atbx`; `pro_inspect_model` reads any `.atbx` back (Esri's own included);
+`pro_toolbox_datatypes` lists valid parameter datatypes.
+
+### Live (`live_*`) — the OPEN Pro session via the .NET bridge
+
+ping, list_layers, zoom_to, query, run_gp, add_layer, export_layout, get_request.
+
+### Portal (`portal_*`)
+
+connect, whoami, publish_layer, search_items, get_item, create_webmap,
+set_layer_symbology, set_layer_labeling, share_item.
+
+### WebApp (`webapp_*`)
+
+create (static app), **create_dashboard** (interactive dashboard),
+**github_pipeline** (deploy to GitHub + Pages).
+
+---
+
+## Performance
+
+Measured on a real ArcGIS Pro 3.x install:
+
+| Operation | Cost |
+| --- | --- |
+| `import arcpy` | **25.1 s**, once per process |
+| `Describe` + `ListFields` + `GetCount` (one `describe_layer`) | ~430 ms |
+| Repeat `describe_layer`, cached | **1 ms** |
+| `pro_context` over an 11-layer geodatabase | 5.4 s cold, 1.2 s warm |
+| `field_statistics` on 13.5k rows | 329 ms → 184 ms (numpy) |
+| Full tool schema, every request | 114 tools ≈ 17.8k tokens |
+
+The server imports arcpy on a background thread at startup, so your **first**
+request no longer pays the 25 s. Schema reads are cached with a TTL, and
+`get_features` drops geometry fields by default.
+
+**Trim the tool list** when you don't need everything:
+
+```bat
+set ARCGIS_SALAH_TOOLSETS=core,portal,webapp
+```
+
+| Setting | Tools | Tokens |
+| --- | --- | --- |
+| unset (everything) | 114 | ~17.8k |
+| `core` | 41 | ~5.4k |
+| `core,portal,webapp` | 53 | ~7.4k |
+| `core,geoai` | 57 | ~8.5k |
+
+Groups: `core` (always kept), `geoai`, `unet`, `schema`, `validate`,
+`authoring`, `live`, `portal`, `webapp`.
+
+---
+
+## How to run the Utility Network tools
+
+A utility network has hard preconditions. These were all hit while building a
+real one, so the tools now either handle them or say plainly what is missing.
+
+**Before you start:** the feature dataset's classes must be **Z- and M-enabled**
+(`ERROR 160527` otherwise), and the utility network needs a service-territory
+polygon.
+
+```
+1. pro_un_create(feature_dataset, "WaterUtilityNetwork", service_territory)
+      -> ArcGIS auto-creates WaterDevice / WaterLine / WaterJunction /
+         WaterAssembly / WaterSubnetLine and the Structure* classes.
+
+2. pro_un_add_domain_network(un, "Water", "HIERARCHICAL", "SOURCE")
+
+3. pro_un_add_tier(un, "Water", "Distribution", rank=1, topology_type="MESH")
+      -> A hierarchical network needs a tier GROUP and a SUBNETWORK FIELD; both
+         are created for you. Two constraints ArcGIS enforces:
+         * rank is per tier group, so with one tier per group rank is always 1;
+         * every tier in the network must share the same topology type.
+
+4. Asset groups are SUBTYPES on the UN classes, and asset types are coded values
+   in ASSETTYPE. Create them with pro_set_subtypes / pro_create_domain.
+      -> enable_topology refuses until EVERY asset group of EVERY network class
+         has an ASSETTYPE domain (ERROR 003077), and each domain must include
+         the field's existing default value.
+
+5. pro_un_add_rule(un, "JUNCTION_EDGE_CONNECTIVITY",
+                   "WaterDevice", "Valve", "Gate",
+                   "WaterLine", "Main", "PVC")
+      -> The topology will not enable with no rules at all (ERROR 002673).
+
+6. pro_un_topology(un, "enable")   then   pro_un_topology(un, "validate")
+
+7. Load features INSIDE an edit session (arcpy.da.Editor) — UN classes reject
+   edits outside one.
+
+8. Trace:
+     pro_un_add_trace_locations(un, out_fc)   # select your start features first
+     pro_un_trace(un, "CONNECTED", starting_points=out_fc,
+                  result_types=["AGGREGATED_GEOMETRY"], out_lines=...)
+      -> A trace REJECTS a plain feature-class copy of your start points
+         (ERROR 001911); it needs the purpose-built locations table.
+```
+
+**Changing the schema?** Run `pro_un_topology(un, "disable")` first — ArcGIS
+refuses schema edits while the topology is enabled.
+
+---
+
+## How to run the GeoAI tools
+
+**Always start with `pro_geoai_check_environment`.** Deep-learning failures in
+ArcGIS arrive late and opaque; this reports the Image Analyst licence, whether
+`arcpy.geoai` is present, the torch version and whether a CUDA GPU exists.
+
+### Three ways to work, from least to most effort
+
+**1. Describe what you want, in words** — no model, no training, no class list:
+
+```
+pro_geoai_detect_by_text(
+    in_raster = "imagery/scene.tif",
+    class_name = "swimming pool",       # or "solar panel", "flooded road"
+    box_threshold = 0.25,
+    text_threshold = 0.25)
+```
+
+Returns each detection's label and confidence. A grounded vision-language model
+(GroundingDINO + BERT) does the work. Raise the thresholds if you get false
+positives, lower them if you get nothing.
+
+> **Speed:** measured at **731 s for a single 1024×1024 image on CPU**. With a
+> CUDA GPU this is roughly two orders of magnitude faster. On CPU, submit it
+> through `pro_job_submit` so the agent stays responsive.
+
+**2. "More like this"** — label ONE example, find the rest, still no training:
+
+```
+pro_geoai_generate_embeddings(in_data, out_embeddings, model_definition)
+pro_geoai_find_similar(out_embeddings, query_features, out_features,
+                       threshold = 0.8)
+```
+
+A vision foundation model (DINOv3-class, SAM) turns the imagery into embedding
+vectors; similarity search then replaces training entirely.
+
+**3. Train your own** — when you need a specific, repeatable classifier:
+
+```
+pro_geoai_export_training_data(in_raster, out_folder, in_class_data,
+                               task = "object_detection")
+pro_geoai_train_model(out_folder, model_folder, "FASTERRCNN", max_epochs = 20)
+pro_geoai_detect_objects(in_raster, out_features, model_package)
+```
+
+`pro_geoai_train_and_detect` chains all three. `pro_geoai_model_types` lists the
+valid model types per task, and the training format is derived from `task` so it
+cannot mismatch what you later train — the classic "trained for two hours, then
+it failed" bug.
+
+### Getting imagery
+
+Any georeferenced raster works. For a quick test you can pull real satellite
+imagery from Esri's World Imagery service:
+
+```
+https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/
+    MapServer/export?bbox=<xmin,ymin,xmax,ymax>&bboxSR=3857&imageSR=3857
+    &size=1024,1024&format=tiff&f=image
+```
+
+Write a matching `.tfw` world file so the result is georeferenced.
 
 ---
 
@@ -466,6 +700,10 @@ dashboard), **github_pipeline** (deploy to GitHub + Pages).
 | `ARCGIS_BRIDGE_PORT` | `2026` | Live bridge loopback port (no token) |
 | `ARCGIS_BRIDGE_READONLY` | `false` | Truthy ⇒ `live_*` refuses commands that change the session |
 | `CLI_ANYTHING_ARCGIS_PYTHON` / `ARCGIS_PRO_PYTHON` | — | Explicit path to `arcgispro-py3` python.exe |
+| `ARCGIS_SALAH_TOOLSETS` | all | Comma list of tool groups to keep (see [Performance](#performance)) |
+| `ARCGIS_SALAH_CACHE_TTL` | `300` | Schema-cache TTL in seconds; `0` disables caching |
+| `ARCGIS_SALAH_NO_WARMUP` | `0` | Truthy skips the background arcpy import |
+| `ARCGIS_SALAH_NO_REEXEC` | `0` | Truthy skips the `arcgispro-py3` re-exec |
 
 ---
 
@@ -477,18 +715,20 @@ Core tests run without any ArcGIS install (CI runs this):
 PYTHONPATH=src python -m pytest tests/test_core.py
 ```
 
-They cover the result envelope/guard behavior, graceful ArcPy/bridge-absent
-degradation, the metadata inference, and the **web-app + dashboard generators**.
+53 tests covering the result envelope/guard behaviour, graceful ArcPy- and
+bridge-absent degradation, the metadata inference, the schema cache, pipeline
+placeholder substitution, the `.pyt` and `.atbx` generators, toolset gating, and
+the argument validation that deliberately runs *before* any backend import.
 
 ### Regenerating the ribbon icons
 
 The icons are rasterized from the official Calcite/Octicons SVGs by
-`ProSalahBridge/Images/make_icons.py` (dev-only; needs `matplotlib`,
+`SalahAIBridge/Images/make_icons.py` (dev-only; needs `matplotlib`,
 `svgpath2mpl`, `Pillow`):
 
 ```bat
 pip install matplotlib svgpath2mpl pillow
-python ProSalahBridge\Images\make_icons.py
+python SalahAIBridge\Images\make_icons.py
 ```
 
 ---
@@ -501,13 +741,15 @@ src/arcgis_pro_salah_mcp/
   bootstrap.py       self-healing arcgispro-py3 discovery
   config.py          env-driven config (portal URL, profile, JS SDK version, bridge port)
   _result.py         {"ok": ...} envelope + guard decorator
-  pro/               Layer 1  — ArcPy ops + data-derived metadata
+  pro/               Layer 1  — ArcPy ops, one-call context, cache, pipeline/jobs,
+                     schema (domains/subtypes/rules), validate (topology),
+                     geoai, unet, toolbox (.pyt), modelbuilder (.atbx)
   live/              Layer 1b — client/ops/policy for the live .NET bridge
   portal/ops.py      Layer 2  — ArcGIS API for Python
   webapp/            Layer 3  — generator.py (web app), dashboard.py (dashboard),
                      github.py (deploy), templates/ (index.html, app.js,
                      dashboard.html, dashboard.js)
-ProSalahBridge/      the ArcGIS Pro .NET add-in (live bridge + Salah MCP ribbon)
+SalahAIBridge/      the ArcGIS Pro .NET add-in (live bridge + Salah MCP ribbon)
 tests/test_core.py   backend-free tests
 demos/               setup_sample.py (build a sample.gdb), check_github_token.py
 docs/                ARCHITECTURE.md, PROTOCOL.md

@@ -6,7 +6,7 @@ production URL. Used two ways:
 
   * the MCP tool ``webapp_github_pipeline`` (agent-driven), and
   * a stdin runner — ``python -m arcgis_pro_salah_mcp.webapp.github`` — that the
-    ProSalahBridge "Deploy Web App" ribbon button shells out to (token on stdin).
+    SalahAIBridge "Deploy Web App" ribbon button shells out to (token on stdin).
 
 ``requests`` is imported lazily (it ships with arcgispro-py3), so importing this
 module never fails and a missing dependency comes back as a clean error envelope.
