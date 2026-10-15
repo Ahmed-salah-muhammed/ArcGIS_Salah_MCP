@@ -53,6 +53,7 @@ thread awaits that task, then serializes the result.
 | `run_gp` | `{ tool, args[], kwargs{} }` | `{ tool, outputs[] }` (outputs added to active map) |
 | `add_layer` | `{ path }` | `{ added, map }` |
 | `export_layout` | `{ layout, out_path, dpi? }` | `{ output, dpi }` |
+| `add_toolbox` | `{ path }` | `{ path, registered, already_registered, steps[] }` |
 | `get_request` | `{ clear? }` | `{ pending, kind, text, created_at }` (what the user queued from the ribbon) |
 
 ### Notes per command
@@ -63,6 +64,9 @@ thread awaits that task, then serializes the result.
   selection when `selection: true`).
 - **`export_layout`** — resolve the layout by name from the active project,
   `layout.ExportAsync(new PDFFormat{ Resolution = dpi, OutputFileName = out_path })`.
+- **`add_toolbox`** (add-in 0.1.4+) — registers an existing `.atbx`/`.tbx`/`.pyt` in the open project's
+  Toolboxes with the public `ItemFactory.Create` + `Project.AddItem`, verified against
+  `Project.GetItems<GeoprocessingProjectItem>()`; attempts are returned in `steps`.
 - **`get_request`** — returns the request the user parked from the ribbon (Create
   Web App prompt / Publish); `kind` is `web_app` or `publish`, `text` is what they
   typed. Pass `{"clear": true}` to consume it. Lets the agent pick up the user's intent.
@@ -74,7 +78,7 @@ client (`live/policy.py`) enforces two guard rails **before** sending a request,
 so a refused command never reaches the add-in:
 
 - **Read-only mode** — set env `ARCGIS_BRIDGE_READONLY` (truthy: `1/true/yes/on`)
-  to refuse every mutating command (`run_gp`, `add_layer`, `export_layout`).
+  to refuse every mutating command (`run_gp`, `add_layer`, `export_layout`, `add_toolbox`).
   Reads and navigation (`ping`, `list_layers`, `query`, `zoom_to`) stay allowed.
   Refusal envelope: `{"ok": false, "error": "...", "code": "readonly"}`.
 - **Destructive confirmation** — `run_gp` can overwrite/delete data, so it

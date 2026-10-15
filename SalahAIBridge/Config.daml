@@ -5,7 +5,7 @@
         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:schemaLocation="http://schemas.esri.com/DADF/Registry file:///{ProgramFiles}/ArcGIS/Pro/bin/ArcGIS.Desktop.Framework.xsd">
 
-  <AddInInfo id="{6f3a1c2e-9b47-4d0a-8e21-5c7f0a9b4d10}" version="0.1.2" desktopVersion="3.7">
+  <AddInInfo id="{6f3a1c2e-9b47-4d0a-8e21-5c7f0a9b4d10}" version="0.1.4" desktopVersion="3.7">
     <Name>SalahAIBridge</Name>
     <Description>
       <pre>Live bridge that exposes the open ArcGIS Pro session to the ArcGIS Pro Salah MCP server</pre>

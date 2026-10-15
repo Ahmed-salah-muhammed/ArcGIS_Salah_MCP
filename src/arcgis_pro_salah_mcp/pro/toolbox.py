@@ -17,12 +17,14 @@ runs the geoprocessing steps you declared or hosts your own Python.
 """
 from __future__ import annotations
 
+import json
 import keyword
 import os
 import re
 from typing import Any
 
 from .._result import err, guard, ok
+from . import register as _register
 
 # The GP datatypes that cover essentially every real toolbox parameter. ArcGIS
 # accepts more, but an unknown string here produces a toolbox that loads with an
@@ -222,28 +224,47 @@ def _render_execute(tool: dict, params: list[dict]) -> list[str]:
         return lines
 
     lines.append("        arcpy.env.overwriteOutput = True")
+    # `{{memory}}` in a step's args/kwargs becomes an in-memory intermediate that is deleted when
+    # the tool ends (even on failure), so a workflow leaves nothing but its declared outputs.
+    memory_paths = [
+        f"memory\\step{n}" for n, step in enumerate(steps, start=1)
+        if "{{memory}}" in json.dumps([step.get("args") or [], step.get("kwargs") or {}])
+    ]
+    indent = "            " if memory_paths else "        "
+    if memory_paths:
+        lines.append("        try:")
     for n, step in enumerate(steps, start=1):
         tool_name = step.get("tool")
-        args = step.get("args") or []
         label = step.get("label") or tool_name
-        rendered = ", ".join(_render_arg(a, params) for a in args)
-        lines.append(f'        arcpy.AddMessage("[{n}/{len(steps)}] {label}")')
-        lines.append(f"        step{n} = arcpy.{tool_name}({rendered})")
-    lines.append("")
-    lines.append(f'        arcpy.AddMessage("Done.")')
-    lines.append(f"        return step{len(steps)}" if steps else "        return")
+        pieces = [_render_arg(a, params, n) for a in step.get("args") or []]
+        pieces += [f"{k}={_render_arg(v, params, n)}" for k, v in (step.get("kwargs") or {}).items()]
+        lines.append(f'{indent}messages.addMessage("[{n}/{len(steps)}] {label}")')
+        lines.append(f"{indent}step{n} = _first_output(arcpy.{tool_name}({', '.join(pieces)}))")
+    lines.append(f'{indent}messages.addMessage("Done.")')
+    if memory_paths:
+        lines.append("        finally:")
+        for path in memory_paths:
+            lines.append(f"            if arcpy.Exists({_py(path)}):")
+            lines.append(f"                arcpy.management.Delete({_py(path)})")
+    lines.append("        return")
     lines.append("")
     return lines
 
 
-def _render_arg(arg: Any, params: list[dict]) -> str:
-    """``{{param_name}}`` -> the local variable; ``{{stepN}}`` -> that step's result."""
+def _render_arg(arg: Any, params: list[dict], step_no: int = 0) -> str:
+    """``{{param_name}}`` -> the local variable; ``{{stepN}}`` -> that step's output path;
+    ``{{memory}}`` -> this step's in-memory intermediate. Lists are rendered element by element,
+    so ``["{{step1}}", "{{overlay}}"]`` works for multi-input tools such as Intersect."""
+    if isinstance(arg, (list, tuple)):
+        return "[" + ", ".join(_render_arg(a, params, step_no) for a in arg) + "]"
     if not isinstance(arg, str):
         return _py(arg)
     m = re.fullmatch(r"\{\{\s*(\w+)\s*\}\}", arg)
     if not m:
         return _py(arg)
     token = m.group(1)
+    if token == "memory" and step_no:
+        return _py(f"memory\\step{step_no}")
     if re.fullmatch(r"step\d+", token):
         return token
     known = {p["name"] for p in params}
@@ -336,8 +357,11 @@ def create_python_toolbox(
     alias: str | None = None,
     description: str | None = None,
     overwrite: bool = True,
+    register_in_project: bool = False,
 ) -> dict:
     """Write a working ``.pyt`` from a declarative spec.
+
+    ``register_in_project=True`` also adds it to the OPEN Pro project (via the live bridge).
 
     ``tools`` entries::
 
@@ -355,15 +379,19 @@ def create_python_toolbox(
          ],
          "steps": [                          # OR "execute_code" for hand-written logic
             {"tool": "analysis.Buffer",
-             "args": ["{{roads}}", "{{output}}", "{{distance}}"]}
+             "kwargs": {"in_features": "{{roads}}", "out_feature_class": "{{output}}",
+                        "buffer_distance_or_field": "{{distance}}"}}   # or positional "args"
          ],
          "validations": [
             {"parameter": "distance", "condition": "value <= 0",
              "message": "Distance must be positive."}
          ]}
 
-    Inside ``steps.args``, ``{{param_name}}`` refers to a parameter and
-    ``{{stepN}}`` to an earlier step's result.
+    Inside a step's ``args`` / ``kwargs`` (keyword arguments are preferred, as Esri recommends),
+    ``{{param_name}}`` refers to a parameter, ``{{stepN}}`` to an earlier step's output path
+    and ``{{memory}}`` to an in-memory intermediate for this step (deleted when the tool ends).
+    Unlike a ModelBuilder model, a .pyt handles multi-input tools such as Intersect and any
+    intermediate type; write those with ``execute_code`` or a list in ``args``/``kwargs``.
     """
     if not tools:
         return err("Provide at least one tool.", code="no_tools")
@@ -410,6 +438,11 @@ def create_python_toolbox(
         "import arcpy",
         "",
         "",
+        "def _first_output(result):",
+        '    """First output of a geoprocessing Result as a string (None if the tool has none)."""',
+        "    return result.getOutput(0) if result.outputCount else None",
+        "",
+        "",
         "class Toolbox(object):",
         '    """The toolbox ArcGIS discovers when this .pyt is opened."""',
         "",
@@ -446,7 +479,7 @@ def create_python_toolbox(
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(source)
 
-    return ok(
+    result = ok(
         {
             "toolbox": os.path.abspath(out_path),
             "alias": toolbox_alias,
@@ -467,3 +500,4 @@ def create_python_toolbox(
             ),
         }
     )
+    return _register.attach(result, os.path.abspath(out_path), register_in_project)

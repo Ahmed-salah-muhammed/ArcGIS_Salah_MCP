@@ -443,9 +443,36 @@ You want to see **✓ CREATE OK** and **✓ PUSH OK**.
 
 ## Tools
 
-**114 tools in nine groups.** Every tool's schema is sent to the model on every
+**119 tools in nine groups.** Every tool's schema is sent to the model on every
 request, so `ARCGIS_SALAH_TOOLSETS` lets you keep only the groups you need — see
 [Performance](#performance).
+
+### What's new — notebooks, workflows and toolboxes
+
+Two new tools and two upgraded ones. Together they cover "give me a notebook for this model" and
+"turn this workflow into a tool I can reuse".
+
+| Tool | Status | What it does | What you can now ask for |
+| --- | --- | --- | --- |
+| **`pro_dl_notebook`** | **New** | Interviews you first (batch size, epochs, learning rate, chip size, model options), then writes a ready-to-run `.ipynb` into the open project's folder. 13 trainable `arcgis.learn` models plus Esri's pretrained *Building Change Detection*. | *"I want a notebook that detects buildings"*, *"…that classifies objects"*, *"…that finds change between two dates"*. It asks the questions instead of guessing, then you run the notebook cell by cell in Pro. |
+| **`live_add_toolbox`** | **New** (add-in 0.1.4) | Adds an existing `.atbx` / `.tbx` / `.pyt` to the **open** project's Toolboxes and confirms it landed. | A tool the agent just generated shows up in Catalog and the Geoprocessing pane without *Add Toolbox* by hand. |
+| **`pro_create_python_toolbox`** | **Upgraded** | The recommended way to turn a workflow into a tool with parameters. Steps take keyword arguments, `{{memory}}` for temporary in-memory results (deleted when the tool ends), and lists for multi-input tools like Intersect. Adds the toolbox to the open project. | *"Make a tool that clips my layer to a boundary, intersects it with another layer and exports the result"* — you get a tool with four parameters and progress messages. |
+| **`pro_create_model`** | **Upgraded** | Writes an editable ModelBuilder model. Now **refuses** (`unsupported_model`) the patterns that did not run in Pro 3.7 instead of writing a broken model, and points to the `.pyt` route. | A linear chain of feature-class tools (Buffer → Dissolve …) as a visual model. For anything else it tells you to use `pro_create_python_toolbox`. |
+
+Good to know:
+
+- **What was verified.** A Clip → Intersect → Export `.pyt` ran on real data and matched an independent
+  arcpy result (3 rows, area 9000.0). `live_add_toolbox` registered a generated `.pyt` in a live Pro 3.7
+  project. Generated notebooks compile, pass `nbformat.validate`, and their setup cells ran; the model
+  training itself was **not** run end to end.
+- **Notebooks are added by hand.** Neither `arcpy` nor the public SDK can add a notebook to the open
+  project: Catalog pane → right-click **Notebooks** → **Add and Open Notebook**.
+- **First `.pyt` load asks to trust the code.** Pro shows a dialog; until you click **Trust**, every
+  `live_*` call times out, and the toolbox is added as soon as you do.
+- **ModelBuilder limits.** Multi-input tools (Intersect, Union, Merge …) and folder/file/layer
+  intermediates (e.g. Export → Train → Detect) did not validate, and canvas Groups cannot be generated —
+  use the `.pyt` route for those.
+- **Needs add-in 0.1.4** for `live_add_toolbox`: close Pro, then double-click the `.esriAddinX`.
 
 ### Core — analysis & speed (`pro_*`)
 
@@ -505,6 +532,68 @@ export_map_series, run_gp, execute_code.
 | `pro_geoai_train_and_detect` | Labels → chips → model → detections, one call |
 | `pro_geoai_describe_model` / `pro_geoai_model_types` | Inspect a `.dlpk`; list valid model types |
 
+### Deep-learning notebooks — interview first, then a script (`geoai` toolset)
+
+One tool: **`pro_dl_notebook`**. You say what you want; it does **not** guess batch size or
+epochs. It replies with a recommended model and the questions to ask, you answer, and it
+writes an `.ipynb` whose cells follow the same steps as a hand-written `arcgis.learn`
+notebook — one step per cell, so you run it one cell at a time inside ArcGIS Pro.
+
+1. `pro_dl_notebook(goal="a model that classifies objects")` → `status=ask_user`: the
+   recommended model plus the questions (batch size, epochs, learning rate, chip size,
+   backbone, mixed precision, early stopping…). Plain *"classification"* is ambiguous, so
+   it returns `status=choose` (pixel / object / detect) instead of guessing.
+2. The agent asks you in chat.
+3. Same call again with your answers → `status=created`, saved in the **open Pro
+   project's folder** (found through the live bridge). It refuses until `training_data`,
+   `batch_size` and `epochs` are given (`data_path_later=true` waives only the path, and
+   only when you said you will type it yourself).
+
+| What you say | Model | Export format |
+| --- | --- | --- |
+| detect / segment buildings, each its own shape | Mask R-CNN | `RCNN_Masks` |
+| boxes or counts | Faster R-CNN, RetinaNet, SSD, YOLOv3, DETReg, RT-DETR v2 | `PASCAL_VOC_rectangles` / `KITTI_rectangles` |
+| classify **every pixel** (land cover) | U-Net, DeepLab, PSPNet, SAM + LoRA | `Classified_Tiles` |
+| classify **each object** (roof type, damaged/intact) | Feature Classifier | `Labeled_Tiles` / `MultiLabeled_Tiles` / `Imagenet` |
+| just "classification" | asks which of the three | — |
+| **change detection** | asks: Esri's ready-made model, or train your own | — |
+| change detection, ready-made ("from Esri") | **Esri Building Change Detection** — no training | two aligned 10-20 cm images |
+| change detection, your own labels | Change Detector | `Classified_Tiles` exported with `in_raster2` |
+
+**Esri's ready-made Building Change Detection** is a different kind of notebook: nothing is
+trained, so it asks only for the *before* and *after* images (no batch size or epochs), then
+downloads the model from ArcGIS Online, runs `DetectChangeUsingDeepLearning`, saves the
+result and adds it to the map. Read its limits first (taken from the item page): it needs
+**10-20 cm** aerial/drone imagery for both dates, accurately aligned; it outputs a
+continuous change-magnitude raster, not a binary map; it works best in less densely
+populated urban areas; Esri says it **cannot be fine-tuned**; and the item is flagged
+**Requires Subscription** under the Esri Master License Agreement. The notebook prints the
+licence before it downloads anything. (It is the only ready-made model wired up so far;
+Esri publishes 170 deep-learning packages.)
+
+Cell order of the training notebooks (mirrors the course notebook): environment check → imports → parameters →
+`prepare_data` → `data.classes` → `show_batch` → model → `supported_datasets` →
+`lr_find` → `fit` → `plot_losses` → metrics → `show_results` → `save` → optional
+inference (`DetectObjectsUsingDeepLearning`, `ClassifyPixelsUsingDeepLearning` or
+`ClassifyObjectsUsingDeepLearning`, matching the model). The metric cell depends on what
+the class really has: detectors `average_precision_score`, pixel models `accuracy` /
+`per_class_metrics` / `mIOU`, Feature Classifier `plot_confusion_matrix`, SAM + LoRA none.
+
+Every constructor and `fit` argument the generator emits was read from the installed
+`arcgis.learn` with `inspect.signature`; model-specific ones go in `options`
+(e.g. `{"pointrend": true}`) and anything the class does not accept is refused.
+
+**Adding the notebook to your project.** A `.ipynb` dropped into the project folder is
+**not** picked up: Pro records notebooks as `projectItems` inside the `.aprx`, and neither `arcpy`
+nor the public SDK can add one from outside (an attempt through the add-in was tried and removed).
+Add it by hand: Catalog pane, right-click **Notebooks → Add and Open Notebook**, choose the file.
+
+> What was verified: the generated cells compile, the files pass `nbformat.validate`,
+> and the environment-check, import and parameter cells were executed on Pro's
+> interpreter (the `prepare_data` cell then stops at a missing data path, as it should).
+> What was **not**: the training and inference cells have never run on real labelled
+> data here — there is no labelled-buildings dataset and no CUDA GPU on this machine.
+
 ### Utility Network (`unet` toolset)
 
 `pro_un_describe` (the whole model in one read), `pro_un_build` (author a network
@@ -516,14 +605,27 @@ from one declarative spec), `pro_un_create`, `pro_un_add_domain_network`,
 
 ### Toolbox authoring (`authoring` toolset)
 
-**`pro_create_python_toolbox`** writes a working `.pyt`;
-**`pro_create_model`** writes a real, editable **ModelBuilder** model into a
-`.atbx`; `pro_inspect_model` reads any `.atbx` back (Esri's own included);
+**Turning a workflow into a tool with parameters** — use **`pro_create_python_toolbox`**. It writes a
+working `.pyt` (parameters, validation, messages) and adds it to the open project. It handles any
+tool, multi-input tools such as Intersect, and any intermediate type. Steps use keyword arguments;
+`{{param}}` is a parameter, `{{stepN}}` an earlier output, `{{memory}}` an in-memory intermediate that
+is deleted when the tool ends. Verified: a Clip -> Intersect -> Export `.pyt` ran on real data and its
+output matched an independent arcpy computation (3 rows, area 9000.0). The first time Pro loads a
+`.pyt` it shows a *trust the code source* dialog; until you click Trust, `live_*` calls time out.
+
+**`pro_create_model`** writes an editable **ModelBuilder** model into a `.atbx`, but only **linear
+chains of feature-class tools** are verified to run. It refuses (`code="unsupported_model"`) what
+did not: multi-input tools (Intersect/Union/Merge...) fed from a reference, and folder/file/layer
+intermediates such as an Export -> Train -> Detect deep-learning chain. `allow_unverified=True`
+overrides it if you hold a Pro-authored model of the same chain to match. Canvas Groups cannot be
+generated. `pro_inspect_model` reads any `.atbx` back (Esri's own included);
 `pro_toolbox_datatypes` lists valid parameter datatypes.
 
 ### Live (`live_*`) — the OPEN Pro session via the .NET bridge
 
-ping, list_layers, zoom_to, query, run_gp, add_layer, export_layout, get_request.
+ping, list_layers, zoom_to, query, run_gp, add_layer, export_layout, get_request,
+**add_toolbox** (puts an `.atbx`/`.tbx`/`.pyt` — e.g. a model from `pro_create_model` — into the
+open project's Toolboxes; verified on Pro 3.7).
 
 ### Portal (`portal_*`)
 
@@ -548,7 +650,7 @@ Measured on a real ArcGIS Pro 3.x install:
 | Repeat `describe_layer`, cached | **1 ms** |
 | `pro_context` over an 11-layer geodatabase | 5.4 s cold, 1.2 s warm |
 | `field_statistics` on 13.5k rows | 329 ms → 184 ms (numpy) |
-| Full tool schema, every request | 114 tools ≈ 17.8k tokens |
+| Full tool schema, every request | 119 tools ≈ 19.9k tokens |
 
 The server imports arcpy on a background thread at startup, so your **first**
 request no longer pays the 25 s. Schema reads are cached with a TTL, and
@@ -562,10 +664,10 @@ set ARCGIS_SALAH_TOOLSETS=core,portal,webapp
 
 | Setting | Tools | Tokens |
 | --- | --- | --- |
-| unset (everything) | 114 | ~17.8k |
-| `core` | 41 | ~5.4k |
-| `core,portal,webapp` | 53 | ~7.4k |
-| `core,geoai` | 57 | ~8.5k |
+| unset (everything) | 119 | ~19.9k |
+| `core` | 44 | ~6.0k |
+| `core,portal,webapp` | 56 | ~8.0k |
+| `core,geoai` | 61 | ~9.9k |
 
 Groups: `core` (always kept), `geoai`, `unet`, `schema`, `validate`,
 `authoring`, `live`, `portal`, `webapp`.
@@ -645,9 +747,11 @@ Returns each detection's label and confidence. A grounded vision-language model
 (GroundingDINO + BERT) does the work. Raise the thresholds if you get false
 positives, lower them if you get nothing.
 
-> **Speed:** measured at **731 s for a single 1024×1024 image on CPU**. With a
-> CUDA GPU this is roughly two orders of magnitude faster. On CPU, submit it
-> through `pro_job_submit` so the agent stays responsive.
+> **Caveats, measured on this CPU-only machine:** 731 s for one 1024×1024 image and
+> 156 s for one 512×512 tile. In **both** runs the returned boxes were zero-size at the
+> raster's top-left corner, and a scene with dozens of buildings produced a single
+> detection — so do not rely on it to *locate* things yet. The cause was not found (a GPU
+> and other tile sizes were not tried). On CPU, submit it through `pro_job_submit`.
 
 **2. "More like this"** — label ONE example, find the rest, still no training:
 

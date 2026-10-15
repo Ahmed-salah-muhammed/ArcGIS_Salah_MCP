@@ -35,6 +35,7 @@ from .pro import unet as pro_unet
 from .pro import toolbox as pro_toolbox
 from .pro import modelbuilder as pro_modelbuilder
 from .pro import symbology as pro_symbology
+from .pro import dl_notebooks as pro_dl
 from .live import ops as live
 from .portal import ops as portal
 from .webapp import generator as webapp
@@ -352,6 +353,12 @@ def live_get_request(clear: bool = False) -> dict:
 # =====================================================================
 # Layer 2 — Portal / ArcGIS Online (ArcGIS API for Python)
 # =====================================================================
+
+
+@mcp.tool()
+def live_add_toolbox(path: str) -> dict:
+    """Add an existing .atbx/.tbx/.pyt (e.g. a model from pro_create_model) to the OPEN ArcGIS Pro project's Toolboxes so it appears in Catalog and the Geoprocessing pane. Needs add-in 0.1.4+."""
+    return live.live_add_toolbox(path)
 
 
 @mcp.tool()
@@ -969,6 +976,42 @@ def pro_geoai_train_and_detect(
 # =====================================================================
 
 
+# =====================================================================
+# Layer 1f (cont.) — Deep-learning NOTEBOOKS: interview first, then a script
+# One tool on purpose: every tool schema is sent on every request.
+# =====================================================================
+
+
+@mcp.tool()
+def pro_dl_notebook(
+    goal: str = "detect buildings",
+    out_path: str | None = None,
+    model: str | None = None,
+    training_data: str | None = None,
+    batch_size: int | None = None,
+    epochs: int | None = None,
+    learning_rate: float | None = None,
+    chip_size: int | None = None,
+    val_split_pct: float | None = None,
+    options: dict | None = None,
+    mixed_precision: bool = False,
+    early_stopping: bool = False,
+    model_name: str | None = None,
+    input_raster: str | None = None,
+    input_features: str | None = None,
+    second_raster: str | None = None,
+    data_path_later: bool = False,
+    overwrite: bool = False,
+) -> dict:
+    """Make an arcgis.learn TRAINING notebook for ArcGIS Pro (detect, segment, classify pixels/objects, change detection) to run one cell at a time. Change detection can instead use Esri's ready-made Building Change Detection (no training, needs 10-20 cm before/after images: pass input_raster=before, second_raster=after). CALL FIRST with only `goal`: it replies status=ask_user (recommended model + the questions: batch size, epochs, learning rate...) or status=choose (plain "classification" is ambiguous: pixel / object / detect). ASK the user, never guess, then call again with the answers to get status=created. `options` = model-specific args e.g. {"backbone":"resnet34","pointrend":true}. out_path defaults to the open Pro project's folder. data_path_later=true ONLY if the user said they will type the data path. Add the file in Pro via Catalog > Notebooks > Add and Open Notebook."""
+    return pro_dl.notebook(
+        goal, out_path, model, training_data, batch_size, epochs, learning_rate,
+        chip_size, val_split_pct, options, mixed_precision, early_stopping,
+        model_name, input_raster, input_features, second_raster,
+        data_path_later=data_path_later, overwrite=overwrite,
+    )
+
+
 @mcp.tool()
 def pro_un_describe(utility_network: str, include_rules: bool = False) -> dict:
     """The whole utility-network model in ONE read: domain networks, tiers, terminals, network attributes, categories. Start here."""
@@ -1196,9 +1239,12 @@ def pro_create_python_toolbox(
     tools: list[dict],
     alias: str | None = None,
     description: str | None = None,
+    register_in_project: bool = True,
 ) -> dict:
-    """Write a working .pyt Python toolbox. tools: [{"name","label","parameters":[{"name","label","datatype","direction","default"}], "steps":[{"tool":"analysis.Buffer","args":["{{param}}"]}] or "execute_code"}]. See pro_toolbox_datatypes."""
-    return pro_toolbox.create_python_toolbox(out_path, label, tools, alias, description)
+    """PREFERRED way to turn a workflow into a toolbox tool: writes a working .pyt (handles any tool, multi-input like Intersect, any intermediate) and adds it to the open Pro project. tools: [{"name","label","parameters":[{"name","label","datatype","direction","default"}], "steps":[{"tool":"analysis.Clip","kwargs":{"in_features":"{{param}}","out_feature_class":"{{memory}}"}}] or "execute_code"}]; {{stepN}}=earlier output, {{memory}}=temp. First load shows Pro's 'trust' dialog. See pro_toolbox_datatypes."""
+    return pro_toolbox.create_python_toolbox(
+        out_path, label, tools, alias, description, register_in_project=register_in_project
+    )
 
 
 @mcp.tool()
@@ -1216,10 +1262,13 @@ def pro_create_model(
     parameters: list[dict] | None = None,
     model_label: str | None = None,
     description: str | None = None,
+    allow_unverified: bool = False,
+    register_in_project: bool = True,
 ) -> dict:
-    """Write a REAL, editable ModelBuilder model into a .atbx. steps: [{"tool":"analysis.Buffer","params":{"in_features":"{{roads}}"},"output_param":"out_feature_class","output":"{{result}}"}]. Use {{param}} for a declared parameter and {{stepN}} to chain step N's output."""
+    """Write an editable ModelBuilder model (.atbx) - ONLY linear chains of feature-class tools are verified; multi-input tools (Intersect/Union/Merge) and folder/file/layer intermediates are refused (use pro_create_python_toolbox). steps: [{"tool":"analysis.Buffer","params":{"in_features":"{{roads}}"},"output_param":"out_feature_class","output":"{{result}}"}]. {{param}}=declared parameter, {{stepN}}=step N's output. Adds it to the open project."""
     return pro_modelbuilder.create_model(
-        out_path, toolbox_label, model_name, steps, parameters, model_label, description
+        out_path, toolbox_label, model_name, steps, parameters, model_label, description,
+        allow_unverified=allow_unverified, register_in_project=register_in_project,
     )
 
 
@@ -1247,7 +1296,7 @@ def pro_inspect_model(atbx_path: str) -> dict:
 TOOLSETS: dict[str, tuple[str, ...]] = {
     # Always kept: the fast-context tools plus the everyday ArcPy surface. These
     # carry no prefix rule because "core" is defined as whatever is left over.
-    "geoai": ("pro_geoai_",),
+    "geoai": ("pro_geoai_", "pro_dl_"),
     "unet": ("pro_un_",),
     "schema": (
         "pro_list_domains", "pro_create_domain", "pro_assign_domain",

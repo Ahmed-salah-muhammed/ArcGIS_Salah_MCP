@@ -96,3 +96,17 @@ def live_get_request(clear: bool = False) -> dict:
     ``clear=True`` to consume it once handled.
     """
     return client.post("get_request", {"clear": clear})
+
+
+@guard
+def live_add_toolbox(path: str) -> dict:
+    """Add an existing ``.atbx`` / ``.tbx`` / ``.pyt`` to the OPEN project's Toolboxes.
+
+    Uses the public SDK route (``ItemFactory.Create`` + ``Project.AddItem``) and VERIFIES the
+    result, so a model written by ``pro_create_model`` shows up in Catalog > Toolboxes and the
+    Geoprocessing pane. Needs add-in 0.1.4+; ``steps`` lists what was tried.
+    """
+    blocked = policy.check("add_toolbox")
+    if blocked:
+        return blocked
+    return client.post("add_toolbox", {"path": path})

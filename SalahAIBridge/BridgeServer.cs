@@ -54,6 +54,7 @@ namespace SalahAIBridge
                 ["add_layer"]     = new AddLayerCommand(),
                 ["export_layout"] = new ExportLayoutCommand(),
                 ["get_request"]   = new GetRequestCommand(),
+                ["add_toolbox"]   = new AddToolboxCommand(),
             };
         }
 

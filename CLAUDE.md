@@ -13,7 +13,7 @@ a different Esri technology:
   `webapp_create` (web app), `webapp_create_dashboard` (dashboard),
   `webapp_github_pipeline` (deploy to GitHub + Pages)
 
-113 tools in total, grouped into toolsets (see **Performance** below).
+119 tools in total, grouped into toolsets (see **Performance** below).
 
 Canonical agent workflow: **Pro (analyze) → Portal (publish) → WebApp (visualize)**.
 
@@ -46,7 +46,7 @@ dotnet build SalahAIBridge\SalahAIBridge.csproj -c Release
 # → bin\Release\net10.0-windows\SalahAIBridge.esriAddinX ; double-click to install.
 # ArcGIS Pro MUST be closed before reinstalling, or the old add-in stays loaded.
 # Pro installs it to  …\Documents\ArcGIS\AddIns\ArcGISPro\{6f3a1c2e-…}\  — check the
-# version in Add-In Manager (Config.daml `version`, currently 0.1.2) to confirm a reload.
+# version in Add-In Manager (Config.daml `version`, currently 0.1.4) to confirm a reload.
 ```
 
 ## Architecture
@@ -68,6 +68,53 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   (topology + geometry), `pro/geoai.py` (deep learning / VLM / foundation
   models), `pro/unet.py` (Utility Network) — each follows the same
   `@guard`-per-op convention.
+- `pro/dl_notebooks.py` — **pure Python** deep-learning *notebook* authoring, exposed as
+  ONE tool, `pro_dl_notebook` (every tool schema is sent on every request, so four tools
+  became one: ~1,180 -> ~660 tokens). Flow: called with only a `goal` it returns
+  `status=ask_user` (recommended model + the interview questions) or `status=choose`
+  (plain "classification" is ambiguous: pixel / object / detect); the agent ASKS the user;
+  called again with the answers it writes the `.ipynb` (`status=created`) into the open
+  Pro project's folder, found through the live bridge. It keeps asking until
+  `training_data`, `batch_size` and `epochs` exist, and `create_training_notebook`
+  refuses with `needs_answers`, so the interview cannot be skipped
+  (`data_path_later=True` waives only the path, and only when the user said so).
+  Routing used to send EVERY classification request to Mask R-CNN (found by testing it);
+  object classification is `FeatureClassifier` (formats Labeled_Tiles / MultiLabeled_Tiles
+  / Imagenet, metric `plot_confusion_matrix` only, applied with
+  `ClassifyObjectsUsingDeepLearning`). Every constructor/`fit` keyword it emits was read
+  from the installed `arcgis.learn` (API 2.4.3) with `inspect.signature`;
+  `MODELS[...]["init_args"]` is that record, so add a model only after re-reading its
+  signature. Other facts that shaped it: `import arcgis.learn` took **138 s** cold;
+  `prepare_data` defaults to `batch_size=64`, `chip_size=224`, `val_split_pct=0.1`;
+  SamLoRA/MMSegmentation have no metric method; MMDetection/MMSegmentation need a
+  mandatory `model` name (left out). GroundingDINO was dropped from the notebooks:
+  `arcpy.ia.DetectObjectsUsingText` returned zero-size boxes at the raster's top-left
+  corner in two CPU runs (1024x1024/4 tiles, and a clean 512x512 single tile) and one
+  detection for a scene with dozens of buildings; cause unknown (GPU / tile size /
+  `return_box_only` untried). `pro_geoai_detect_by_text` still exists, but do not
+  present its output as locations.
+  Change detection has TWO routes and plain "change" asks which: the ready-made Esri
+  "Building Change Detection" DLPK (item `a779106c...`, 93 MB) via
+  `create_pretrained_notebook` — no training, so NO batch size/epochs questions; per its
+  item page: 10-20 cm aligned imagery for both dates, continuous change-magnitude output,
+  not fine-tunable, flagged 'Requires Subscription' (Esri Master License) — or a trainable
+  `ChangeDetector` (data exported with `in_raster2` -> folders images/images2/labels,
+  which `prepare_data` auto-detects as ChangeDetection; metric `precision_recall_score`;
+  `attention_type` PAM|BAM). Both are applied with `DetectChangeUsingDeepLearning`. Add a
+  new ready-made model only after reading its item page the same way (`PRETRAINED`).
+- Notebooks: Pro writes **nbformat 4.4**, kernelspec `{"name": "python3",
+  "display_name": "ArcGISPro"}`, and the `ArcGISPro` kernelspec folder has no
+  `kernel.json`, so headless execution (`nbclient`, kernel `python3`) works only when
+  launched from Pro's own Python. A `.ipynb` in the project folder is **not**
+  registered: the `.aprx` is a zip whose `GISProject.json` holds a `CIMProjectItem`
+  (`itemType: "Notebook"`, relative `catalogPath`, absolute `pathHint`) per notebook.
+  The SDK's public `Geoprocessing.OpenNotebook` takes no path, so we cannot open one in
+  the live session; the user adds it via Catalog > Notebooks > Add and Open Notebook.
+- `pro/symbology.py` — AM/FM utility symbology (`ESRI AMFM Water` glyph font) built on
+  CIM. A hand-built `CIMUniqueValueRenderer` inspected as valid yet drew nothing; the
+  working approach lets `lyr.symbology.updateRenderer` build the renderer and only
+  swaps each class's symbol. ArcPy locks an `.aprx` for the life of the process, so
+  open it once per call and run render steps in a fresh process.
 - `pro/toolbox.py` (`.pyt`) and `pro/modelbuilder.py` (`.atbx`) — **pure Python,
   no arcpy**, so both are fully unit-tested with no ArcGIS installed. See
   **Toolbox authoring** below.
@@ -111,6 +158,24 @@ raises**: transport failures come back as `err("bridge unreachable: …")`.
   agent. Instead a ribbon button parks the user's intent in the C# static
   `AppRequest` (`AppRequest.cs`) and the agent polls it with `live_get_request`
   (`{pending, kind, text, created_at}`; `kind` is `web_app` or `publish`).
+- **Registering a notebook in the open project was tried and REMOVED — do not retry the same way.**
+  `arcpy` has no notebook API (`ArcGISProject` has no `getDefinition`) and the public SDK cannot add one
+  by path. Reading `ArcGIS.Desktop.Catalog.dll` metadata found `GeoDatabaseModule.AddNotebookProjectItem
+  (notebookFilePath, bAddToFavorite)` (`internal static Task<Item>`); called by reflection on Pro 3.7 it
+  returns WITHOUT an item, and the public `ItemFactory.Create` + `Project.AddItem` returns `false`, so
+  nothing registered (note `Project.GetNotebooks()` is null while a project has no notebooks). An untried
+  lead: a notebook file's context menu has the generic `esri_core_addToProject` command
+  (`Resources/.../Extensions/Catalog/ADGeoDatabase.daml`). Until then the user adds the notebook by hand.
+- **Tests must never reach a real bridge**: with the add-in running they could register temp files in the
+  developer's project, so the autouse fixture in `tests/test_core.py` blocks `client.post` and the bridge
+  probe for the DL and toolbox-registration tests.
+- **`add_toolbox`** (`Commands/AddToolboxCommand.cs`, add-in 0.1.4): registers an `.atbx`/`.tbx`/`.pyt`
+  in the open project's Toolboxes via the PUBLIC `ItemFactory.Create` + `Project.AddItem`, verified
+  against `GetItems<GeoprocessingProjectItem>()` (type lives in `ArcGIS.Desktop.GeoProcessing`).
+  **Verified live** (Pro 3.7, add-in 0.1.4): a generated `.pyt` was registered in the open project and
+  confirmed by `GetItems<GeoprocessingProjectItem>`. Trap: the FIRST time a `.pyt` is loaded Pro shows a
+  "trust the code source" dialog on the UI thread; every bridge command (even `ping`) then times out until
+  the user clicks Trust, after which the pending call completes.
 - C# handlers must do all project/map/layout work inside `QueuedTask.Run(...)`
   (Main CIM Thread); the HttpListener callback is a worker thread.
 
@@ -151,7 +216,7 @@ anything here; several obvious ideas turned out to be wrong.
 | Opening an `.aprx` | 0.15 s cold, 0.01 s warm — **not** a bottleneck |
 | `Describe` / `ListFields` / `GetCount` | 73 / 172 / 189 ms |
 | one uncached `pro_describe_layer` | ~430 ms |
-| full tool schema, sent every request | 113 tools = **17.7k tokens** |
+| full tool schema, sent every request | 119 tools = **19.9k tokens** |
 
 The dominant cost is **round trips**, not ArcPy: every extra tool call is a full
 model inference. Four mechanisms address that:
@@ -172,9 +237,18 @@ model inference. Four mechanisms address that:
    and poll with `pro_job_status`.
 
 **Toolset gating.** `ARCGIS_SALAH_TOOLSETS` prunes tool groups at startup:
-`core,portal,webapp` takes 113 tools -> 53 and 17.7k -> 7.4k tokens. Groups:
+`core,portal,webapp` takes 119 tools -> 56 and 19.9k -> 8.0k tokens. Groups:
 `core` (always kept), `geoai`, `unet`, `schema`, `validate`, `authoring`,
 `live`, `portal`, `webapp`. `pro_toolsets` reports what is active.
+
+**Where notebook creation time actually goes** (measured, `-X importtime` + timers):
+writing a 32-cell notebook is **~5 ms** (compile + save) — not the bottleneck. The costs
+are: server start **~6 s warm / ~16 s cold**, of which the MCP SDK alone is ~14 s cold
+(`mcp.client.session` ~4 s, pulled in by `mcp.server.fastmcp`; not our code); the live
+bridge's project lookup **120-1300 ms** (so `pro_dl_notebook` only does a ~1 ms socket
+probe while interviewing and defers the real lookup to the moment it writes); and the
+tool schema (hence one DL tool, not four). The generated notebook's own first run is
+dominated by `import arcgis.learn` (~2 min) — unavoidable.
 
 Also: `field_statistics` uses `TableToNumPyArray` + numpy (329 ms -> 184 ms on
 13.5k rows) with a cursor fallback for non-numeric fields, and `get_features`
@@ -200,8 +274,35 @@ toolbox, importing it with `arcpy.ImportToolbox`, and **running it on real data*
   the *next* step fails validation with "The value is not a Feature Class").
   The value uses an inline `%scratchgdb%` variable that ModelBuilder resolves at
   run time, so the generated model stays portable.
+- **Which path to use for "workflow -> tool with parameters":** the `.pyt` (`pro_create_python_toolbox`).
+  It was verified end to end (Clip -> Intersect -> Export on synthetic data, output equal to an
+  independent arcpy computation, in-memory intermediates cleaned up, registered in the open project via
+  `add_toolbox`). `create_model` is guarded: `_unsupported()` refuses (code `unsupported_model`) a
+  multi-input tool (`_MULTI_INPUT`: Intersect/Union/PairwiseIntersect/Merge/Append/...) whose input is a
+  `{{ref}}`, and any step output / `extra_outputs` that is not a feature-class intermediate
+  (`_VERIFIED_INTERMEDIATE`), because those generated models fail Pro's up-front validation.
+  `allow_unverified=True` bypasses it. `.pyt` steps take `kwargs` (preferred) or `args`; `{{memory}}`
+  makes an in-memory intermediate deleted in a `finally`; `{{stepN}}` is the earlier output PATH
+  (`_first_output(result)`); list values are resolved element by element. Both generators take
+  `register_in_project` (the MCP wrappers default it to True; the pure functions to False so tests never
+  reach a bridge) and `pro/register.py` turns a bridge timeout on a `.pyt` into `pending` + the
+  Trust-dialog hint instead of a bare error.
 - No `tool.model.diagram.xml` is written — ModelBuilder auto-lays-out the canvas,
-  which is far safer than hand-generating that format.
+  which is far safer than hand-generating that format. Canvas **Groups** (the yellow boxes) live
+  in that diagram file, not in `tool.model`, so the generator cannot make them.
+- **Pro's own convention for a tool-output variable** (read from a Pro-authored model): `intermediate`,
+  `derived:"true"`, `connection_type:"Parameter"`, a `datatype` and a design-time `value`. Steps may list
+  `extra_outputs` (outputs a tool DERIVES, e.g. a trainer's `.dlpk`) and read them as `{{stepN.param}}`.
+- **Unsolved (now refused by the guard, not silently generated) — an Export -> Train -> Detect (Image Analyst) chain does not validate.** Running the
+  generated model with `arcpy` fails up front with `Parameters are not valid`. Measured on 1 real run
+  each: wiring Train's `in_folder` to a model-PARAMETER variable crashes Esri's own validator
+  (`self.params[0].values`: "Parameter has no attribute 'values'"; `in_folder` is multivalue); wiring it to
+  an intermediate removes the crash but leaves `Input Training Data: Value is required`; a literal path
+  validates the trainer; and the derived `.dlpk` only stops failing `Model Definition: Value is
+  required` when it has an explicit design-time `value`. The remaining `Input Training Data` / `Output
+  Folder` errors were not resolved. A Pro-authored model of the same chain is the missing reference.
+  Esri docs (https://doc.esri.com/en/arcgis-pro/latest/arcpy/geoprocessing_and_python/): a validator can
+  call `isInputValueDerived()` ("tool runs inside a model and its input comes from another tool's output").
 
 ## Conventions (follow when adding tools)
 1. **Result envelope.** Return `ok(data)` / `err(msg)` from `_result`; decorate
@@ -240,7 +341,7 @@ if you keep Pro somewhere non-standard.
 
 ## Tests
 `tests/test_core.py` must stay backend-free and green with **no ArcGIS installed**
-(53 tests). It covers the envelope/guard behavior, graceful ArcPy- and
+(91 tests). It covers the envelope/guard behavior, graceful ArcPy- and
 bridge-absent degradation, the `live/policy.py` rails, `pro/metadata.py` theme
 inference, both webapp generators, the cache (including the gdb-lock-file case
 and the TTL), pipeline placeholder substitution, the `.pyt` and `.atbx`

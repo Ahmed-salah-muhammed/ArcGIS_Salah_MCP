@@ -39,6 +39,7 @@ import zipfile
 from typing import Any
 
 from .._result import err, guard, ok
+from . import register as _register
 from .toolbox import DATATYPES, _identifier, _resolve_datatype
 
 # Written into tool.content so ArcGIS knows which schema it is reading. These are
@@ -55,6 +56,9 @@ _PARAM_TYPES = {"required", "optional", "derived"}
 # `memory\`, a scratch-gdb intermediate survives the run, which is what you want
 # when debugging why step 3 got the wrong input.
 _INTERMEDIATE_VALUE_FMT = r"%scratchgdb%\{name}"
+# A folder output (e.g. exported training chips) cannot live in a geodatabase.
+_FOLDER_VALUE_FMT = r"%scratchfolder%\{name}"
+_FOLDER_TYPES = {"DEFolder", "DEWorkspace"}
 
 # Default type for an intermediate. Declaring SOMETHING here is mandatory, not
 # cosmetic: without a `datatype` ArcGIS validates the downstream step against an
@@ -155,7 +159,26 @@ def _normalise_parameter(p: dict, index: int) -> tuple[dict | None, str | None]:
     )
 
 
-_REF = re.compile(r"^\{\{\s*(\w+)\s*\}\}$")
+# What has actually been verified in ArcGIS Pro 3.7 (generate -> ImportToolbox -> run on data):
+# linear chains whose intermediates are FEATURE CLASSES. Two patterns were tried and did NOT run
+# (see CLAUDE.md "Toolbox authoring"): feeding a step output / model parameter into a MULTI-INPUT
+# parameter (5 encodings of Intersect's `in_features`), and intermediates that are folders, files
+# or layers (Export -> Train -> Detect deep learning; Select By Location). A model that cannot
+# validate when run as a tool is worse than no model, so these are refused up front.
+_VERIFIED_INTERMEDIATE = {"DEFeatureClass"}
+_MULTI_INPUT = {
+    "analysis.Intersect": "in_features",
+    "analysis.Union": "in_features",
+    "analysis.PairwiseIntersect": "in_features",
+    "management.Merge": "inputs",
+    "management.Append": "inputs",
+    "management.MosaicToNewRaster": "input_rasters",
+    "management.CompositeBands": "in_rasters",
+}
+_USE_PYT = ("Use pro_create_python_toolbox for this workflow, or pass allow_unverified=True "
+            "if you have a Pro-authored model of the same chain to match.")
+
+_REF = re.compile(r"^\{\{\s*([\w.]+)\s*\}\}$")
 
 
 def _build_model(
@@ -195,6 +218,9 @@ def _build_model(
     # 2. Each step becomes a process, with an intermediate variable for its
     #    output so the next step can consume it.
     step_output_var: dict[int, str] = {}
+    # (step number, tool parameter) -> variable, for outputs a later step reads by name
+    # as {{stepN.param}} - e.g. the .dlpk a training tool derives next to its folder.
+    step_named_var: dict[tuple[int, str], str] = {}
     for n, step in enumerate(steps, start=1):
         tool_name = step.get("tool")
         if not tool_name:
@@ -224,6 +250,16 @@ def _build_model(
                 token = ref.group(1)
                 if token in param_var:
                     process["params"][key] = {"element_id": param_var[token]}
+                    continue
+                named = re.fullmatch(r"step(\d+)\.(\w+)", token)
+                if named:
+                    key_ = (int(named.group(1)), named.group(2))
+                    if key_ not in step_named_var:
+                        return None, (
+                            f"Step #{n} references {{{{{token}}}}}, but step {key_[0]} declared "
+                            f"no output '{key_[1]}' (list it under 'extra_outputs')."
+                        )
+                    process["params"][key] = {"element_id": step_named_var[key_]}
                     continue
                 m = re.fullmatch(r"step(\d+)", token)
                 if m:
@@ -259,13 +295,14 @@ def _build_model(
                 # with "Output Feature Class: Value is required"; without
                 # `datatype` the NEXT step fails validation with "The value is
                 # not a Feature Class". Both verified empirically.
+                fmt = _FOLDER_VALUE_FMT if inter_dt in _FOLDER_TYPES else _INTERMEDIATE_VALUE_FMT
                 mb.variables.append(
                     {
                         "id": vid,
                         "title": f"$rc:model.element{vid}",
                         "altered": "true",
                         "intermediate": "true",
-                        "value": _INTERMEDIATE_VALUE_FMT.format(name=inter_name),
+                        "value": fmt.format(name=inter_name),
                         "datatype": {"type": inter_dt},
                     }
                 )
@@ -276,11 +313,62 @@ def _build_model(
             }
             step_output_var[n] = vid
 
+        # Extra outputs: further parameters the tool writes or DERIVES (a trainer's
+        # .dlpk, a detector's classified raster). Each is its own green oval, readable
+        # by later steps as {{stepN.param}}. No `value` is written: the tool derives it.
+        for extra in step.get("extra_outputs") or []:
+            key = extra.get("param") if isinstance(extra, dict) else None
+            if not key:
+                return None, f"Step #{n}: every extra_outputs entry needs a 'param' (the tool parameter name)."
+            evid = mb.new_id()
+            mb.add_rc(f"model.element{evid}", extra.get("label") or key)
+            edt = _resolve_datatype(extra.get("datatype") or "file")
+            if edt is None:
+                return None, f"Step #{n}: unknown datatype {extra.get('datatype')!r} for extra output '{key}'."
+            variable = {
+                "id": evid,
+                "title": f"$rc:model.element{evid}",
+                "altered": "true",
+                "intermediate": "true",
+                "datatype": {"type": edt},
+            }
+            if extra.get("value"):
+                variable["value"] = extra["value"]
+            mb.variables.append(variable)
+            process["params"][key] = {"altered": "true", "direction": "out", "element_id": evid}
+            step_named_var[(n, key)] = evid
+
         mb.processes.append(process)
 
     if not mb.processes:
         return None, "A model needs at least one step."
     return mb, None
+
+
+def _unsupported(steps: list[dict]) -> str | None:
+    """A reason this workflow is known not to run as a generated model, else None."""
+    for n, step in enumerate(steps, start=1):
+        tool = str(step.get("tool") or "")
+        key = _MULTI_INPUT.get(tool)
+        if key and key in (step.get("params") or {}):
+            raw = step["params"][key]
+            items = raw if isinstance(raw, list) else [raw]
+            if any(isinstance(i, str) and _REF.match(i) for i in items):
+                return (f"Step #{n} ({tool}): wiring '{key}' from a {{{{reference}}}} is not supported - "
+                        f"multi-input parameters did not validate or run in generated ModelBuilder "
+                        f"models on Pro 3.7. {_USE_PYT}")
+        declared = [(step.get("output_datatype") or "feature_class", "its output")]
+        declared += [(e.get("datatype") or "file", f"extra output '{e.get('param')}'")
+                     for e in step.get("extra_outputs") or [] if isinstance(e, dict)]
+        output = step.get("output")
+        for alias, what in declared:
+            if what == "its output" and isinstance(output, str) and _REF.match(output):
+                continue  # a declared tool parameter, not an intermediate
+            resolved = _resolve_datatype(alias)
+            if resolved not in _VERIFIED_INTERMEDIATE:
+                return (f"Step #{n} ({tool}): {what} is a {alias!r} intermediate; only feature-class "
+                        f"intermediates have been verified to validate and run. {_USE_PYT}")
+    return None
 
 
 @guard
@@ -294,8 +382,15 @@ def create_model(
     description: str | None = None,
     alias: str | None = None,
     overwrite: bool = True,
+    allow_unverified: bool = False,
+    register_in_project: bool = False,
 ) -> dict:
     """Write a ``.atbx`` containing a real, editable ModelBuilder model.
+
+    Only linear chains of feature-class tools are verified to run; multi-input tools
+    (Intersect, Union, Merge ...) fed from a reference and folder/file/layer intermediates
+    are refused with ``code="unsupported_model"`` (``allow_unverified=True`` overrides).
+    ``register_in_project=True`` also adds the toolbox to the OPEN Pro project.
 
     ``steps`` entries::
 
@@ -309,6 +404,8 @@ def create_model(
 
     ``{{name}}`` refers to a declared parameter; ``{{stepN}}`` to step N's output,
     which is what wires one tool's green output oval into the next tool's input.
+    A step may also list ``"extra_outputs": [{"param": "out_model_file", "datatype": "file"}]``
+    for outputs the tool derives; a later step reads one as ``{{stepN.out_model_file}}``.
 
     Open the result in ArcGIS Pro: Catalog > Toolboxes > Add Toolbox, then
     right-click the model > Edit to see the connected graph.
@@ -335,6 +432,11 @@ def create_model(
             return err(f"Duplicate parameter name '{spec['name']}'.", code="duplicate_parameter")
         seen.add(spec["name"])
         normalised.append(spec)
+
+    if not allow_unverified:
+        problem = _unsupported(steps)
+        if problem:
+            return err(problem, code="unsupported_model")
 
     mb, problem = _build_model(tool_label, normalised, steps)
     if problem:
@@ -395,7 +497,7 @@ def create_model(
         z.writestr(f"{tool_class}.tool/tool.model", dump(tool_model))
         z.writestr(f"{tool_class}.tool/tool.model.diagram", dump(tool_diagram))
 
-    return ok(
+    result = ok(
         {
             "toolbox": os.path.abspath(out_path),
             "alias": toolbox_alias,
@@ -413,6 +515,7 @@ def create_model(
             ),
         }
     )
+    return _register.attach(result, os.path.abspath(out_path), register_in_project)
 
 
 @guard
