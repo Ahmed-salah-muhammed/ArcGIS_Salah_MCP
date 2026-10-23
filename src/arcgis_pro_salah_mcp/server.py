@@ -36,6 +36,7 @@ from .pro import toolbox as pro_toolbox
 from .pro import modelbuilder as pro_modelbuilder
 from .pro import symbology as pro_symbology
 from .pro import dl_notebooks as pro_dl
+from .pro import egdb as pro_egdb
 from .live import ops as live
 from .portal import ops as portal
 from .webapp import generator as webapp
@@ -282,6 +283,207 @@ def pro_execute_code(code: str) -> dict:
     """Escape hatch: run arbitrary ArcPy Python. `arcpy` is pre-imported."""
     return pro.execute_code(code)
 
+
+
+# =====================================================================
+# Enterprise geodatabase (pro_egdb_*): create -> users -> versioning -> archiving -> maintenance -> replication
+# Passwords are passed as ENV VAR NAMES (e.g. "EGDB_SDE_PWD"), never as plain text.
+# Tools marked DESTRUCTIVE must be confirmed with the user before calling.
+# =====================================================================
+
+
+@mcp.tool()
+def pro_egdb_create(database_platform: str, instance: str, database_name: str, authorization_file: str,
+                    dba_user: str, dba_password_env: str, gdb_admin_password_env: str,
+                    gdb_admin_name: str = "sde", account_authentication: str = "DATABASE_AUTH",
+                    schema_type: str = "SDE_SCHEMA", tablespace: str | None = None,
+                    spatial_type: str | None = None) -> dict:
+    """Create an enterprise geodatabase on self-managed POSTGRESQL / SQL_SERVER / ORACLE (needs DBA rights + keycodes file)."""
+    return pro_egdb.create_gdb(database_platform, instance, database_name, authorization_file, dba_user,
+                               dba_password_env, gdb_admin_password_env, gdb_admin_name, account_authentication,
+                               schema_type, tablespace, spatial_type)
+
+
+@mcp.tool()
+def pro_egdb_enable(admin_connection: str, authorization_file: str) -> dict:
+    """Enable geodatabase functionality in an existing database (Db2, SAP HANA, cloud DBaaS) via an sde connection."""
+    return pro_egdb.enable_gdb(admin_connection, authorization_file)
+
+
+@mcp.tool()
+def pro_egdb_create_connection(out_folder: str, out_name: str, database_platform: str, instance: str,
+                               user: str | None = None, password_env: str | None = None,
+                               database: str | None = None, account_authentication: str = "DATABASE_AUTH",
+                               version: str | None = None, version_type: str | None = None) -> dict:
+    """Create a .sde connection file, optionally pinned to a version (version_type TRADITIONAL|BRANCH)."""
+    return pro_egdb.create_connection(out_folder, out_name, database_platform, instance, user, password_env,
+                                      database, account_authentication, version, version_type)
+
+
+@mcp.tool()
+def pro_egdb_describe(connection: str) -> dict:
+    """Describe an enterprise gdb connection: DBMS, release, user, version and its datasets."""
+    return pro_egdb.describe(connection)
+
+
+@mcp.tool()
+def pro_egdb_create_user(admin_connection: str, user_name: str, password_env: str | None = None,
+                         role: str | None = None, tablespace: str | None = None,
+                         os_authenticated: bool = False) -> dict:
+    """Create a database user (data owner / editor / viewer), optionally adding it to a role."""
+    return pro_egdb.create_user(admin_connection, user_name, password_env, role, tablespace, os_authenticated)
+
+
+@mcp.tool()
+def pro_egdb_create_role(admin_connection: str, role: str, users: list[str] | None = None,
+                         grant: bool = True) -> dict:
+    """Create a role and grant (or revoke) it to users."""
+    return pro_egdb.create_role(admin_connection, role, users, grant)
+
+
+@mcp.tool()
+def pro_egdb_change_privileges(datasets: list[str], user_or_role: str, view: str = "GRANT",
+                               edit: str | None = None) -> dict:
+    """Grant/revoke view and edit privileges on datasets (connect as the data owner)."""
+    return pro_egdb.change_privileges(datasets, user_or_role, view, edit)
+
+
+@mcp.tool()
+def pro_egdb_prepare_dataset(dataset: str, global_ids: bool = True, editor_tracking: bool = False,
+                             attachments: bool = False, register: bool = False) -> dict:
+    """Prepare data for multiuser work: Register With Geodatabase, Global IDs (needed for replication), editor tracking, attachments."""
+    return pro_egdb.prepare_dataset(dataset, global_ids, editor_tracking, attachments, register)
+
+
+@mcp.tool()
+def pro_egdb_register_versioned(dataset: str, move_edits_to_base: bool = False) -> dict:
+    """Register a dataset as versioned (traditional over a direct connection). Replication needs move_edits_to_base=False."""
+    return pro_egdb.register_versioned(dataset, move_edits_to_base)
+
+
+@mcp.tool()
+def pro_egdb_unregister_versioned(dataset: str, compress_default: bool = True) -> dict:
+    """DESTRUCTIVE: unregister a dataset as versioned. Confirm with the user first."""
+    return pro_egdb.unregister_versioned(dataset, compress_default)
+
+
+@mcp.tool()
+def pro_egdb_create_version(connection: str, name: str, parent: str = "sde.DEFAULT",
+                            access: str = "PUBLIC") -> dict:
+    """Create a child/named version (access PUBLIC | PROTECTED | PRIVATE)."""
+    return pro_egdb.create_version(connection, name, parent, access)
+
+
+@mcp.tool()
+def pro_egdb_alter_version(connection: str, version: str, new_name: str | None = None,
+                           description: str | None = None, access: str | None = None) -> dict:
+    """Rename a version or change its access, e.g. protect DEFAULT (connect as sde)."""
+    return pro_egdb.alter_version(connection, version, new_name, description, access)
+
+
+@mcp.tool()
+def pro_egdb_delete_version(connection: str, version: str) -> dict:
+    """DESTRUCTIVE: delete a version. Confirm with the user first."""
+    return pro_egdb.delete_version(connection, version)
+
+
+@mcp.tool()
+def pro_egdb_list_versions(connection: str) -> dict:
+    """List versions (name, access, parent, children, dates)."""
+    return pro_egdb.list_versions(connection)
+
+
+@mcp.tool()
+def pro_egdb_reconcile_post(connection: str, edit_versions: list[str] | None = None,
+                            target_version: str = "sde.DEFAULT", post: bool = True,
+                            conflict_definition: str = "BY_OBJECT",
+                            conflict_resolution: str = "FAVOR_TARGET_VERSION", delete_versions: bool = False,
+                            log_file: str | None = None, all_versions: bool = False) -> dict:
+    """Reconcile versions with a target and optionally post; returns the reconcile log (conflicts)."""
+    return pro_egdb.reconcile_post(connection, edit_versions, target_version, post, conflict_definition,
+                                   conflict_resolution, delete_versions, log_file, all_versions)
+
+
+@mcp.tool()
+def pro_egdb_enable_archiving(dataset: str, enable: bool = True) -> dict:
+    """Enable or disable geodatabase archiving (feature history)."""
+    return pro_egdb.enable_archiving(dataset, enable)
+
+
+@mcp.tool()
+def pro_egdb_connected_users(admin_connection: str) -> dict:
+    """List users connected to the geodatabase (connect as sde)."""
+    return pro_egdb.connected_users(admin_connection)
+
+
+@mcp.tool()
+def pro_egdb_maintenance(admin_connection: str, compress: bool = True, analyze: bool = True,
+                         rebuild_indexes: bool = True, datasets: list[str] | None = None) -> dict:
+    """Compress + Analyze Datasets + Rebuild Indexes (system tables included). Connect as sde."""
+    return pro_egdb.maintenance(admin_connection, compress, analyze, rebuild_indexes, datasets)
+
+
+@mcp.tool()
+def pro_egdb_accept_connections(admin_connection: str, accept: bool) -> dict:
+    """Allow or block new connections (e.g. before an upgrade)."""
+    return pro_egdb.accept_connections(admin_connection, accept)
+
+
+@mcp.tool()
+def pro_egdb_create_replica(datasets: list[str], child_workspace: str, replica_name: str,
+                            replica_type: str = "ONE_WAY_REPLICA", access_type: str = "FULL",
+                            initial_data_sender: str = "PARENT_DATA_SENDER", expand: str = "USE_DEFAULTS",
+                            reuse_schema: str = "DO_NOT_REUSE", get_related: str = "GET_RELATED",
+                            geometry: str | None = None, archiving: str = "DO_NOT_USE_ARCHIVING") -> dict:
+    """Create a replica (CHECK_OUT | ONE_WAY_REPLICA | TWO_WAY_REPLICA). Data must be traditional-versioned with Global IDs."""
+    return pro_egdb.create_replica(datasets, child_workspace, replica_name, replica_type, access_type,
+                                   initial_data_sender, expand, reuse_schema, get_related, geometry, archiving)
+
+
+@mcp.tool()
+def pro_egdb_list_replicas(connection: str) -> dict:
+    """List replicas with type, role, datasets and last sync times."""
+    return pro_egdb.list_replicas(connection)
+
+
+@mcp.tool()
+def pro_egdb_synchronize(geodatabase_1: str, replica_name: str, geodatabase_2: str,
+                         direction: str = "FROM_GEODATABASE1_TO_2", conflict_policy: str = "IN_FAVOR_OF_GDB1",
+                         conflict_definition: str = "BY_OBJECT", reconcile: str = "DO_NOT_RECONCILE") -> dict:
+    """Synchronize replica changes between two connected geodatabases."""
+    return pro_egdb.synchronize(geodatabase_1, replica_name, geodatabase_2, direction, conflict_policy,
+                                conflict_definition, reconcile)
+
+
+@mcp.tool()
+def pro_egdb_export_changes(geodatabase: str, out_file: str, replica_name: str,
+                            switch_to_receiver: str = "DO_NOT_SWITCH",
+                            include_unacknowledged: str = "UNACKNOWLEDGED",
+                            include_new: str = "NEW_CHANGES") -> dict:
+    """Disconnected sync step 1: export a data-change message file."""
+    return pro_egdb.export_changes(geodatabase, out_file, replica_name, switch_to_receiver,
+                                   include_unacknowledged, include_new)
+
+
+@mcp.tool()
+def pro_egdb_import_message(geodatabase: str, message_file: str, out_acknowledgement: str | None = None,
+                            conflict_policy: str = "IN_FAVOR_OF_IMPORTED_CHANGES",
+                            conflict_definition: str = "BY_OBJECT") -> dict:
+    """Disconnected sync step 2: import a data-change or acknowledgment message."""
+    return pro_egdb.import_message(geodatabase, message_file, out_acknowledgement, conflict_policy,
+                                   conflict_definition)
+
+
+@mcp.tool()
+def pro_egdb_export_acknowledgement(geodatabase: str, out_file: str, replica_name: str) -> dict:
+    """Disconnected sync step 3: export an acknowledgment message back to the sender."""
+    return pro_egdb.export_acknowledgement(geodatabase, out_file, replica_name)
+
+
+@mcp.tool()
+def pro_egdb_unregister_replica(geodatabase: str, replica_name: str) -> dict:
+    """DESTRUCTIVE: unregister a replica. Confirm with the user first."""
+    return pro_egdb.unregister_replica(geodatabase, replica_name)
 
 # =====================================================================
 # Layer 1b — Live session (the OPEN ArcGIS Pro session via the .NET bridge)
@@ -1314,6 +1516,7 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
         "pro_create_python_toolbox", "pro_toolbox_datatypes",
         "pro_create_model", "pro_inspect_model",
     ),
+    "egdb": ("pro_egdb_",),
     "live": ("live_",),
     "portal": ("portal_",),
     "webapp": ("webapp_",),
