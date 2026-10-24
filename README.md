@@ -443,7 +443,7 @@ You want to see **✓ CREATE OK** and **✓ PUSH OK**.
 
 ## Tools
 
-**119 tools in nine groups.** Every tool's schema is sent to the model on every
+**156 tools in ten groups.** Every tool's schema is sent to the model on every
 request, so `ARCGIS_SALAH_TOOLSETS` lets you keep only the groups you need — see
 [Performance](#performance).
 
@@ -451,6 +451,10 @@ request, so `ARCGIS_SALAH_TOOLSETS` lets you keep only the groups you need — s
 
 Two new tools and two upgraded ones. Together they cover "give me a notebook for this model" and
 "turn this workflow into a tool I can reuse".
+
+And a new **enterprise geodatabase** toolset (`pro_egdb_*`, 35 tools + `live_add_database`): create or
+enable a geodatabase, connect it to Pro, users/roles/privileges, versioning, archiving, replication and
+maintenance — see [Enterprise geodatabase](#enterprise-geodatabase-egdb-toolset).
 
 | Tool | Status | What it does | What you can now ask for |
 | --- | --- | --- | --- |
@@ -487,7 +491,8 @@ simple questions slow.
 | **`pro_find_layers`** | "Which layer has population data?" without reading every schema |
 | **`pro_sql`** | Attribute query returning the matching **rows** |
 | **`pro_pipeline`** | Chain N geoprocessing tools in one call (`{{prev}}`, `{{stepN}}`) |
-| **`pro_job_submit`** / `pro_job_status` | Run long work on a worker thread, poll for the result |
+| **`pro_job_submit`** / `pro_job_status` | Run long work in the background, poll for the result |
+| **`pro_run_background`** | Run ANY `pro_*` tool as a background job, so it never hits the client's tool timeout |
 | **`pro_server_status`** | arcpy warm-up state and schema-cache hit rate |
 | **`pro_toolsets`** | Which tool groups are active |
 
@@ -621,10 +626,86 @@ overrides it if you hold a Pro-authored model of the same chain to match. Canvas
 generated. `pro_inspect_model` reads any `.atbx` back (Esri's own included);
 `pro_toolbox_datatypes` lists valid parameter datatypes.
 
+### Enterprise geodatabase (`egdb` toolset)
+
+35 tools for the whole life of an enterprise geodatabase on **SQL Server, PostgreSQL and Oracle**:
+create it, connect to it from Pro, manage users and privileges, version, archive, replicate, and
+keep it healthy.
+
+| Stage | Tools | What you can ask for |
+| --- | --- | --- |
+| Create | `pro_egdb_create`, `pro_egdb_enable`, `pro_egdb_prepare_cloud_database` | *"Create an enterprise geodatabase called GIS on my SQL Server"*, *"enable a geodatabase in this Azure SQL / RDS PostgreSQL database"* (the cloud tool returns Esri's required SQL and can run it). |
+| Connect | `pro_egdb_create_connection`, `pro_egdb_describe`, `live_add_database` | A `.sde` file, added to the open project's **Databases**; pinned to a version, a historical marker, a moment in time, or a branch connection. |
+| Users & privileges | `pro_egdb_create_user`, `pro_egdb_create_role`, `pro_egdb_change_privileges`, `pro_egdb_table_privileges`, `pro_egdb_manage_principal` | Create users/roles; give view (SELECT) or edit privileges; grant SELECT / INSERT / UPDATE / DELETE **one by one** on simple tables; change a password; drop a user or role. |
+| Prepare data | `pro_egdb_prepare_dataset`, `pro_egdb_create_view` | Register with the geodatabase, Global IDs, editor tracking, attachments; database views. |
+| Versioning | `register_versioned`, `create_version`, `alter_version`, `list_versions`, `reconcile_post`, `delete_version`, `unregister_versioned` (all `pro_egdb_*`) | Traditional versioning end to end; branch registration through a BRANCH connection. |
+| Archiving | `pro_egdb_enable_archiving` | Turn feature history on/off; read it back with a point-in-time connection. |
+| Administration | `connected_users`, `disconnect_users`, `accept_connections`, `maintenance`, `upgrade`, `version_health`, `config_keywords` (all `pro_egdb_*`) | Who is connected, kick sessions, block connections before maintenance, compress/analyze/rebuild, check or run an upgrade, diagnose/repair version tables, export/import storage keywords. |
+| Replication | `create_replica`, `list_replicas`, `synchronize`, `export_changes`, `import_message`, `export_acknowledgement`, `replica_schema`, `unregister_replica` (all `pro_egdb_*`) | One-way / two-way / check-out replicas, connected and disconnected (message-file) sync, keeping replica schemas in step. |
+
+**Bring your own license and passwords.** Nothing license-related ships with the code. Pass your own
+ArcGIS Server/Enterprise keycodes file as `authorization_file`, or set it once in the MCP server's
+environment. Passwords are never typed into the chat: tools take the *name* of an environment
+variable. For Claude Desktop, put both in the server entry's `env` block:
+
+```json
+"env": {
+  "ARCGIS_EGDB_AUTHORIZATION_FILE": "C:\\path\\to\\your\\keycodes",
+  "EGDB_SDE_PWD": "...",
+  "EGDB_DBA_PWD": "..."
+}
+```
+
+With SQL Server and Windows authentication (`account_authentication="OPERATING_SYSTEM_AUTH"`,
+`schema_type="DBO_SCHEMA"`) no password is needed at all.
+
+**Irreversible or disruptive operations need `confirm=True`** (they refuse with `confirm_required`
+first): deleting versions or replicas, unregistering versioned data, blocking or ending connections,
+upgrading, repairing version tables, dropping users/roles, reconcile with `delete_versions`.
+
+**What was verified** (ArcGIS Pro 3.7). On SQL Server Express, in throwaway geodatabases that
+`pro_egdb_create` itself created and that were dropped afterwards: every tool above ran, including a
+real edit in a child version reconciled and posted into its parent, one-way replication with connected
+and disconnected sync, replica-schema export/compare/import, a point-in-time connection returning the
+older rows, branch registration, enabling a plain database, granular grants checked in
+`sys.database_permissions`, and a password change proven by logging in with the new password. On
+PostgreSQL (throwaway objects in an existing geodatabase, removed afterwards): users, roles, password
+change, granular grants checked in `information_schema`, views, upgrade check, version diagnosis.
+Oracle, cloud services and creating a PostgreSQL geodatabase were **not** run here; the cloud SQL was
+checked for syntax only (SQL Server `SET PARSEONLY`, PostgreSQL inside a rolled-back transaction).
+
+**Things testing uncovered, which the tools now handle:**
+
+- `ReconcileVersions` matches version names **case-sensitively** and silently skips a mismatch
+  (`dbo.child` vs the stored `DBO.child`) while still "succeeding". Names are resolved to their stored
+  spelling, and the result says `reconciled` / `posted` from the log, not from the tool's status.
+- The DEFAULT version is `dbo.DEFAULT` in a DBO-schema SQL Server geodatabase; it is looked up.
+- Enabling a SQL Server database needs `READ_COMMITTED_SNAPSHOT`; if other connections block it, the
+  error carries the exact `ALTER DATABASE` statement for a DBA.
+- On a point-in-time connection, **`GetCount` ignores the moment** (returns today's count) while a
+  cursor returns the historical rows; and the moment is read as **UTC** for non-versioned archives but
+  as **server-local time** for traditional-versioned ones.
+- `UpgradeGDB` *fails* on a current geodatabase (`ERROR 001046`); `pro_egdb_upgrade` reports
+  `up_to_date` instead.
+- A SQL Server login that still has sessions cannot be dropped, and those sessions may be pooled
+  connections that `connected_users` never shows. `ArcSDESQLExecute` cannot end them (it wraps every
+  statement in a transaction and `KILL` is not allowed there), so the tool refuses before dropping
+  anything and returns the `KILL` statements for a DBA.
+- PostgreSQL refuses to drop a role that still holds privileges (Create Database User grants some on
+  PostGIS objects); after proving the role owns nothing, `DROP OWNED BY` revokes them first.
+- Branch registration adds `GDB_BRANCH_ID`, `GDB_FROM_DATE`, … to the table, but `arcpy.ListFields`
+  hides them.
+
+**Not covered:** updating an expired geodatabase license (deliberately left out), editing and
+reconciling branch versions (that needs a feature service from ArcGIS Enterprise; the version tools
+accept a feature-service URL but it was not tested), historical markers (Pro creates them in its
+Geodatabase Connection Properties), and database-level backup/restore.
+
 ### Live (`live_*`) — the OPEN Pro session via the .NET bridge
 
 ping, list_layers, zoom_to, query, run_gp, add_layer, export_layout, get_request,
-**add_toolbox** (puts an `.atbx`/`.tbx`/`.pyt` — e.g. a model from `pro_create_model` — into the
+**add_database** (puts a `.sde` connection or `.gdb` into the open project's Databases — needs add-in
+0.1.5+), **add_toolbox** (puts an `.atbx`/`.tbx`/`.pyt` — e.g. a model from `pro_create_model` — into the
 open project's Toolboxes; verified on Pro 3.7).
 
 ### Portal (`portal_*`)
@@ -650,7 +731,7 @@ Measured on a real ArcGIS Pro 3.x install:
 | Repeat `describe_layer`, cached | **1 ms** |
 | `pro_context` over an 11-layer geodatabase | 5.4 s cold, 1.2 s warm |
 | `field_statistics` on 13.5k rows | 329 ms → 184 ms (numpy) |
-| Full tool schema, every request | 119 tools ≈ 19.9k tokens |
+| Full tool schema, every request | 156 tools ≈ 27.0k tokens |
 
 The server imports arcpy on a background thread at startup, so your **first**
 request no longer pays the 25 s. Schema reads are cached with a TTL, and
@@ -664,13 +745,28 @@ set ARCGIS_SALAH_TOOLSETS=core,portal,webapp
 
 | Setting | Tools | Tokens |
 | --- | --- | --- |
-| unset (everything) | 119 | ~19.9k |
-| `core` | 44 | ~6.0k |
-| `core,portal,webapp` | 56 | ~8.0k |
-| `core,geoai` | 61 | ~9.9k |
+| unset (everything) | 156 | ~27.0k |
+| `core` | 45 | ~6.1k |
+| `core,portal,webapp` | 57 | ~8.2k |
+| `core,geoai` | 62 | ~10.1k |
+| `core,egdb` | 80 | ~13.0k |
 
 Groups: `core` (always kept), `geoai`, `unet`, `schema`, `validate`,
-`authoring`, `live`, `portal`, `webapp`.
+`authoring`, `egdb`, `live`, `portal`, `webapp`.
+
+---
+
+## When something hangs or fails
+
+These came out of a real session (an agent driving the server from Claude Desktop) and are now handled:
+
+| Symptom | Cause (measured) | What to do now |
+| --- | --- | --- |
+| A call ran past about a minute, came back as a timeout, and the calls after it hung | The MCP client stops waiting after roughly a minute, while the server ran every tool **on its event loop**, so one long call froze it | Tools no longer block the server: `pro_server_status` answers instantly and says what is running. For long work (creating a geodatabase, maintenance, replicas, many versions) use **`pro_run_background`** and poll **`pro_job_status`**. The first ArcPy call after the server starts waits for the ~25 s arcpy import (measured ~47 s with a PostgreSQL connection). |
+| `arcpy.ListVersions` → `ERROR 87395`, `ArcSDESQLExecute` → `ERROR 87413`, while the connection itself works | With **PostgreSQL**, ArcPy only works on the thread that imported it; the server imported it on a warm-up thread and ran tools on another (SQL Server was unaffected) | Every ArcPy tool now runs on one dedicated thread that also does the import - the Python counterpart of Pro's Main CIM Thread. |
+| `ArcGISProject("CURRENT")` fails | The server's Python runs outside ArcGIS Pro | `"CURRENT"` is now resolved to the project open in Pro through the live bridge (`pro_execute_code` and every tool that takes a project path). Edits saved to it from outside are overwritten when Pro saves - change the open session with `live_*` tools. |
+| `live_run_gp` → `NullReferenceException` for every tool | The add-in started the tool from its HTTP thread, which is neither Pro's UI thread nor the MCT | Add-in **0.1.6** builds the arguments with `QueuedTask.Run` and starts the tool from the UI thread, reporting each attempt in `steps`; bridge errors now include the failing stack frame (`where`). |
+| New tools are missing after an update | The MCP client keeps the server process it started; `pip install -e` only takes effect in a new process | Fully quit and reopen the MCP client (Claude Desktop: quit from the tray). |
 
 ---
 
@@ -808,6 +904,7 @@ Write a matching `.tfw` world file so the result is georeferenced.
 | `ARCGIS_SALAH_CACHE_TTL` | `300` | Schema-cache TTL in seconds; `0` disables caching |
 | `ARCGIS_SALAH_NO_WARMUP` | `0` | Truthy skips the background arcpy import |
 | `ARCGIS_SALAH_NO_REEXEC` | `0` | Truthy skips the `arcgispro-py3` re-exec |
+| `ARCGIS_EGDB_AUTHORIZATION_FILE` | — | Your own keycodes file for `pro_egdb_create` / `pro_egdb_enable` |
 
 ---
 

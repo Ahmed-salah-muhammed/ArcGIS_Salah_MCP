@@ -110,3 +110,17 @@ def live_add_toolbox(path: str) -> dict:
     if blocked:
         return blocked
     return client.post("add_toolbox", {"path": path})
+
+
+@guard
+def live_add_database(path: str) -> dict:
+    """Add an existing ``.sde`` connection file (or ``.gdb``) to the OPEN project's Databases.
+
+    Public SDK route (``ItemFactory.Create`` + ``Project.AddItem``), verified against the project's
+    database items. Needs add-in 0.1.5+; ``steps`` lists what was tried.
+    """
+    blocked = policy.check("add_database")
+    if blocked:
+        return blocked
+    return client.post("add_database", {"path": path})
+

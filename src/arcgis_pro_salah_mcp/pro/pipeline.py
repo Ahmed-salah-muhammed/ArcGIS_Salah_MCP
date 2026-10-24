@@ -229,11 +229,49 @@ def submit(steps: list[dict], stop_on_error: bool = True, label: str | None = No
             "steps": len(steps),
         }
 
-    threading.Thread(
-        target=_worker, args=(job_id, steps, stop_on_error), daemon=True,
-        name=f"gp-job-{job_id}",
-    ).start()
+    # On THE arcpy thread, not a fresh one: arcpy calls off the importing thread failed with
+    # PostgreSQL geodatabases (see arcpy_thread). Jobs therefore queue behind other arcpy work.
+    from .. import arcpy_thread
+
+    arcpy_thread.submit(_worker, job_id, steps, stop_on_error, label=f"job {job_id}")
     return ok({"job_id": job_id, "state": "queued", "steps": len(steps)})
+
+
+def _new_job(label: str, **extra: Any) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    with _JOBS_LOCK:
+        if len(_JOBS) >= _MAX_JOBS:
+            done = sorted((j for j in _JOBS.values() if j["state"] in ("finished", "failed")),
+                          key=lambda j: j.get("finished_at") or 0)
+            for stale in done[: max(1, len(_JOBS) - _MAX_JOBS + 1)]:
+                _JOBS.pop(stale["id"], None)
+        _JOBS[job_id] = {"id": job_id, "label": label, "state": "queued", "progress": None,
+                         "submitted_at": time.time(), **extra}
+    return job_id
+
+
+def submit_call(label: str, fn: Any, arguments: dict | None = None) -> dict:
+    """Run one tool function as a background job on the arcpy thread; poll with job_status.
+
+    For calls that outlive the MCP client's tool timeout (about a minute was reported): the client
+    gives up waiting but the work carries on, and its envelope is kept here.
+    """
+    from .. import arcpy_thread
+
+    job_id = _new_job(label, tool=label)
+
+    def work() -> None:
+        _set(job_id, state="running", started_at=time.time())
+        try:
+            result = fn(**(arguments or {}))
+            failed = isinstance(result, dict) and result.get("ok") is False
+            _set(job_id, state="failed" if failed else "finished", result=result, finished_at=time.time())
+        except Exception as exc:  # noqa: BLE001 - a job must never die silently
+            _set(job_id, state="failed", error=f"{type(exc).__name__}: {exc}", finished_at=time.time())
+
+    arcpy_thread.submit(work, label=f"background {label}")
+    return ok({"job_id": job_id, "state": "queued", "tool": label,
+               "next": f"pro_job_status(job_id='{job_id}') until state is finished or failed"})
 
 
 @guard

@@ -26,7 +26,7 @@ from ..config import CONFIG
 READ_ONLY = frozenset({"ping", "list_layers", "query", "zoom_to"})
 
 # Change data, the map's layers, or write to disk -> blocked in read-only mode.
-MUTATING = frozenset({"run_gp", "add_layer", "export_layout", "add_toolbox"})
+MUTATING = frozenset({"run_gp", "add_layer", "export_layout", "add_toolbox", "add_database"})
 
 # Subset of MUTATING that can irreversibly overwrite/delete data -> need confirm.
 # ``run_gp`` runs an arbitrary geoprocessing tool (Delete, overwriting outputs,

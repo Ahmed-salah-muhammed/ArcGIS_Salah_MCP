@@ -1672,3 +1672,606 @@ def test_generators_register_in_the_project_only_when_asked(tmp_path, monkeypatc
     assert toolbox.create_python_toolbox(str(tmp_path / "n.pyt"), "N", [], register_in_project=True)["ok"] is False
     assert mb.create_model(str(tmp_path / "x.atbx"), "T", "M", [], register_in_project=True)["ok"] is False
     assert calls == []
+
+
+
+# =====================================================================
+# Enterprise geodatabase (pro_egdb_*) — backend-free, with a fake arcpy
+# =====================================================================
+
+from types import SimpleNamespace as _NS
+
+
+class _FakeResult:
+    outputCount = 1
+
+    def __getitem__(self, i):
+        return r"C:\out\conn.sde"
+
+    def getMessages(self):
+        return "Succeeded"
+
+
+class _FakeArcpy:
+    """Records every GP call; behaviour per tool can be overridden through ``effects``."""
+
+    def __init__(self, versions=(), replicas=(), workspace="RemoteDatabase", described=None, effects=None):
+        self.calls = []
+        fake = self
+
+        class _Toolbox:
+            def __getattr__(self, name):
+                def tool(*args, **kwargs):
+                    fake.calls.append((name, args, kwargs))
+                    if effects and name in effects:
+                        effects[name](*args, **kwargs)
+                    return _FakeResult()
+                return tool
+
+        self.management = _Toolbox()
+        self.da = _NS(ListVersions=lambda c: list(versions), ListReplicas=lambda c: list(replicas))
+        self.env = _NS(workspace=None)
+        self._workspace = workspace
+        self._described = described or {}
+
+    def Describe(self, path):
+        if isinstance(self._workspace, Exception):
+            raise self._workspace
+        return self._described.get(path, _NS(workspaceType=self._workspace, isVersioned=True, hasGlobalID=True))
+
+    def AcceptConnections(self, conn, accept):
+        self.calls.append(("AcceptConnections", (conn, accept), {}))
+
+
+def _version(name, parent=None, children=()):
+    return _NS(name=name, access="Public", parentVersionName=parent, children=list(children), isOwner=True,
+               created="2026-10-24", lastModified="2026-10-24", description="")
+
+
+def _use(monkeypatch, fake):
+    from arcgis_pro_salah_mcp.pro import egdb
+
+    monkeypatch.setattr(egdb, "_arcpy", lambda: fake)
+    return egdb
+
+
+def _sde(tmp_path, name="admin.sde"):
+    path = tmp_path / name
+    path.write_text("x")
+    return str(path)
+
+
+def test_egdb_create_validates_everything_before_importing_arcpy(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.pro import egdb
+
+    def no_arcpy():
+        raise AssertionError("arcpy must not be imported for a call that is already known to be wrong")
+
+    monkeypatch.setattr(egdb, "_arcpy", no_arcpy)
+    keys = _sde(tmp_path, "keycodes.ecp")
+    monkeypatch.delenv("EGDB_NOPE", raising=False)
+    cases = {
+        "bad platform": dict(database_platform="MYSQL"),
+        "missing keycodes": dict(authorization_file=str(tmp_path / "none.ecp")),
+        "db auth without password env": dict(dba_user="sa"),
+        "sde schema without admin password": dict(account_authentication="OPERATING_SYSTEM_AUTH"),
+        "unset env var": dict(dba_user="sa", dba_password_env="EGDB_NOPE", gdb_admin_password_env="EGDB_NOPE"),
+        "dbo schema on postgres": dict(database_platform="POSTGRESQL", schema_type="DBO_SCHEMA"),
+        "postgis on sql server": dict(spatial_type="POSTGIS", account_authentication="OPERATING_SYSTEM_AUTH",
+                                      schema_type="DBO_SCHEMA"),
+    }
+    for label, override in cases.items():
+        args = dict(database_platform="SQL_SERVER", instance=r"HOST\SQLEXPRESS", database_name="gis",
+                    authorization_file=keys)
+        args.update(override)
+        res = egdb.create_gdb(**args)
+        assert res["ok"] is False, label
+        assert res["code"] in {"bad_argument", "not_found", "missing_secret"}, (label, res)
+    assert egdb.create_gdb("SQL_SERVER", "h", "gis", keys, dba_user="sa", dba_password_env="EGDB_NOPE",
+                           gdb_admin_password_env="EGDB_NOPE")["code"] == "missing_secret"
+
+
+def test_egdb_create_with_windows_auth_and_dbo_schema_needs_no_secrets(tmp_path, monkeypatch):
+    fake = _FakeArcpy()
+    egdb = _use(monkeypatch, fake)
+    res = egdb.create_gdb("sql_server", r"HOST\SQLEXPRESS", "gis", _sde(tmp_path, "keycodes.ecp"),
+                          account_authentication="OPERATING_SYSTEM_AUTH", schema_type="DBO_SCHEMA")
+    assert res["ok"] is True and res["data"]["platform"] == "SQL_Server"
+    name, _, kwargs = fake.calls[0]
+    assert name == "CreateEnterpriseGeodatabase"
+    assert kwargs["sde_schema"] == "DBO_SCHEMA" and kwargs["database_platform"] == "SQL_Server"
+    for absent in ("database_admin", "database_admin_password", "gdb_admin_name", "gdb_admin_password"):
+        assert absent not in kwargs, absent
+
+
+def test_egdb_irreversible_ops_need_confirm(tmp_path, monkeypatch):
+    fake = _FakeArcpy(versions=[_version("sde.DEFAULT"), _version("sde.v1", "sde.DEFAULT")])
+    egdb = _use(monkeypatch, fake)
+    conn = _sde(tmp_path)
+    refused = [
+        egdb.delete_version(conn, "sde.v1"),
+        egdb.unregister_versioned(conn + r"\fc"),
+        egdb.unregister_replica(conn, "r1"),
+        egdb.accept_connections(conn, False),
+        egdb.reconcile_post(conn, ["sde.v1"], delete_versions=True),
+    ]
+    assert all(r["ok"] is False and r["code"] == "confirm_required" for r in refused), refused
+    assert fake.calls == []  # nothing reached the database
+
+    assert egdb.delete_version(conn, "sde.v1", confirm=True)["ok"] is True
+    assert egdb.accept_connections(conn, True)["ok"] is True  # re-opening never needs confirmation
+    assert [c[0] for c in fake.calls] == ["DeleteVersion", "AcceptConnections"]
+
+
+def test_egdb_reconcile_reconciles_listed_versions_and_trusts_only_the_log(tmp_path, monkeypatch):
+    log_text = {"value": "Reconcile completed."}
+
+    def write_log(*args, **kwargs):
+        with open(args[10], "w", encoding="utf-8") as fh:
+            fh.write(log_text["value"])
+
+    versions = [_version("dbo.DEFAULT"), _version("dbo.a", "dbo.DEFAULT"), _version("dbo.b", "dbo.a")]
+    fake = _FakeArcpy(versions=versions, effects={"ReconcileVersions": write_log})
+    egdb = _use(monkeypatch, fake)
+    conn = _sde(tmp_path)
+
+    done = egdb.reconcile_post(conn, ["dbo.b"], "dbo.a")["data"]
+    args = fake.calls[-1][1]
+    assert args[1] == "ALL_VERSIONS" and args[2] == "dbo.a" and args[3] == ["dbo.b"]
+    assert done["reconciled"] is True and done["posted"] is True
+
+    # Pro answers "success" even when it reconciled nothing - the log is the only honest signal.
+    log_text["value"] = ("Warning: The reconcile process was not performed. The specified target version "
+                         "(dbo.a) has no edit versions to reconcile with.")
+    skipped = egdb.reconcile_post(conn, ["dbo.b"], "dbo.a")["data"]
+    assert skipped["reconciled"] is False and skipped["posted"] is False
+
+    # Defaults: target = the real DEFAULT (dbo.DEFAULT here), edit versions = every other version.
+    egdb.reconcile_post(conn)
+    args = fake.calls[-1][1]
+    assert args[2] == "dbo.DEFAULT" and args[3] == ["dbo.a", "dbo.b"]
+    egdb.reconcile_post(conn, ["dbo.a"], blocking_only=True)
+    assert fake.calls[-1][1][1] == "BLOCKING_VERSIONS"
+
+
+def test_egdb_version_and_replica_lists_are_json_safe(tmp_path, monkeypatch):
+    child = _version("dbo.child", "dbo.DEFAULT")
+    versions = [_version("dbo.DEFAULT", children=[child]), child]
+    replicas = [_NS(name="dbo.r1", type="OneWay", role="Parent", owner="dbo", version="dbo.DEFAULT",
+                    datasets=["MCP.DBO.fc"], lastSend="t", lastReceive="t", hasConflicts=False, isSender=True)]
+    egdb = _use(monkeypatch, _FakeArcpy(versions=versions, replicas=replicas))
+    conn = _sde(tmp_path)
+
+    listed = egdb.list_versions(conn)
+    json.dumps(listed)  # the MCP transport has to serialise it
+    assert listed["data"]["versions"][0]["children"] == ["dbo.child"]
+    reps = egdb.list_replicas(conn)
+    json.dumps(reps)
+    assert reps["data"]["replicas"][0]["datasets"] == ["MCP.DBO.fc"]
+
+    # The DEFAULT version is looked up, not assumed to be sde.DEFAULT.
+    created = egdb.create_version(conn, "edits")["data"]
+    assert created["parent"] == "dbo.DEFAULT"
+
+
+def test_egdb_create_replica_checks_child_type_and_data_first(tmp_path, monkeypatch):
+    child = str(tmp_path / "child.gdb")
+    fake = _FakeArcpy(described={
+        child: _NS(workspaceType="LocalDatabase"),
+        "fc_ok": _NS(isVersioned=True, hasGlobalID=True),
+        "fc_raw": _NS(isVersioned=False, hasGlobalID=False),
+    })
+    egdb = _use(monkeypatch, fake)
+    for rtype in ("TWO_WAY_REPLICA", "ONE_WAY_CHILD_TO_PARENT_REPLICA"):
+        res = egdb.create_replica(["fc_ok"], child, "r", rtype)
+        assert res["ok"] is False and res["code"] == "bad_argument", rtype
+    raw = egdb.create_replica(["fc_raw"], child, "r", "ONE_WAY_REPLICA")
+    assert raw["code"] == "not_ready" and "versioned" in raw["error"] and "GlobalID" in raw["error"]
+    assert fake.calls == []
+    assert egdb.create_replica(["fc_ok"], child, "r", "one_way_replica")["ok"] is True
+    assert fake.calls[-1][1][1] == "ONE_WAY_REPLICA"
+
+
+def test_egdb_connection_problems_are_explained(tmp_path, monkeypatch):
+    egdb = _use(monkeypatch, _FakeArcpy(workspace=RuntimeError("Could not open SDE workspace")))
+    missing = egdb.list_versions(str(tmp_path / "gone.sde"))
+    assert missing["code"] == "not_found"
+    dead = egdb.describe(_sde(tmp_path))
+    assert dead["code"] == "connection_failed" and "database server is running" in dead["error"]
+
+
+def test_egdb_create_connection_uses_script_keywords(tmp_path, monkeypatch):
+    fake = _FakeArcpy()
+    egdb = _use(monkeypatch, fake)
+    bad = egdb.create_connection(str(tmp_path), "c", "SQL_SERVER", "h", account_authentication="OPERATING_SYSTEM_AUTH",
+                                 version_type="TRADITIONAL")
+    assert bad["code"] == "bad_argument" and "TRANSACTIONAL" in bad["error"]
+    assert fake.calls == []
+    branch = egdb.create_connection(str(tmp_path), "c", "sql_server", "h", account_authentication="OPERATING_SYSTEM_AUTH",
+                                    version="sde.v1", version_type="branch")
+    kwargs = fake.calls[-1][2]
+    assert kwargs["out_name"] == "c.sde" and kwargs["version_type"] == "BRANCH" and "username" not in kwargs
+    assert "ignored" in branch["data"]["note"]
+
+
+def test_egdb_toolset_can_be_switched_off():
+    from arcgis_pro_salah_mcp import server
+
+    assert "egdb" in server.TOOLSETS and server.TOOLSETS["egdb"] == ("pro_egdb_",)
+
+
+def test_egdb_reconcile_matches_version_names_case_insensitively(tmp_path, monkeypatch):
+    """Pro 3.7 skipped 'dbo.c' for the stored 'DBO.c' and reconciled nothing (verified on SQL Server)."""
+    versions = [_version("dbo.DEFAULT"), _version("DBO.p", "dbo.DEFAULT"), _version("DBO.c", "DBO.p")]
+    fake = _FakeArcpy(versions=versions)
+    egdb = _use(monkeypatch, fake)
+    conn = _sde(tmp_path)
+    egdb.reconcile_post(conn, ["dbo.c"], "dbo.p")
+    args = fake.calls[-1][1]
+    assert args[2] == "DBO.p" and args[3] == ["DBO.c"]
+    unknown = egdb.reconcile_post(conn, ["dbo.nope"], "dbo.p")
+    assert unknown["code"] == "unknown_version" and "DBO.c" in unknown["versions"]
+    assert egdb.reconcile_post(conn, ["dbo.c"], "dbo.missing")["code"] == "unknown_version"
+
+
+def test_egdb_explains_sql_server_snapshot_and_non_geodatabase_errors(tmp_path, monkeypatch):
+    def busy(*args, **kwargs):
+        raise RuntimeError("Active connections found during upgrade ERROR: Failed to enable database option "
+                           "READ_COMMITTED_SNAPSHOT on SQL Server database (GIS).")
+
+    fake = _FakeArcpy(effects={"EnableEnterpriseGeodatabase": busy}, described={
+        _sde(tmp_path): _NS(workspaceType="RemoteDatabase", connectionProperties=_NS(database="GIS"))})
+    egdb = _use(monkeypatch, fake)
+    res = egdb.enable_gdb(_sde(tmp_path), _sde(tmp_path, "keycodes.ecp"))
+    assert res["code"] == "needs_read_committed_snapshot"
+    assert "ALTER DATABASE [GIS] SET READ_COMMITTED_SNAPSHOT ON" in res["error"]
+
+    def plain_db(conn):
+        raise TypeError(conn)  # what arcpy.da.ListVersions raised on a database that is not a geodatabase
+
+    fake.da.ListVersions = plain_db
+    listed = egdb.list_versions(_sde(tmp_path))
+    assert listed["ok"] is False and "Is it a geodatabase" in listed["error"]
+
+
+
+# --------------------------------------------------------------------- egdb additions
+
+
+class _FakeSQL:
+    """Stands in for arcpy.ArcSDESQLExecute: records statements, answers queries from ``answers``."""
+
+    def __init__(self, log, answers=None, fail_on=None):
+        self.log, self.answers, self.fail_on = log, answers or {}, fail_on
+
+    def execute(self, statement):
+        if self.fail_on and self.fail_on in statement:
+            raise RuntimeError("database said no")
+        self.log.append(statement)
+        for key, value in self.answers.items():
+            if key in statement:
+                return value
+        return True
+
+
+def _dbms_fake(dbms, answers=None, fail_on=None, **kw):
+    fake = _FakeArcpy(**kw)
+    fake.sql_log = []
+    fake.ArcSDESQLExecute = lambda conn: _FakeSQL(fake.sql_log, answers, fail_on)
+    base = fake.Describe
+
+    def describe(path):
+        d = base(path)
+        if not hasattr(d, "connectionProperties"):
+            d.connectionProperties = _NS(instance=f"sde:{dbms}:host", database="GIS")
+        return d
+
+    fake.Describe = describe
+    return fake
+
+
+def test_egdb_license_comes_from_the_caller_never_from_the_code(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.pro import egdb as egdb_module
+
+    fake = _FakeArcpy()
+    egdb = _use(monkeypatch, fake)
+    monkeypatch.delenv(egdb_module.AUTHORIZATION_ENV, raising=False)
+    args = dict(account_authentication="OPERATING_SYSTEM_AUTH", schema_type="DBO_SCHEMA")
+    missing = egdb.create_gdb("SQL_SERVER", "h", "gis", **args)
+    assert missing["code"] == "missing_authorization" and egdb_module.AUTHORIZATION_ENV in missing["error"]
+    assert egdb.enable_gdb(_sde(tmp_path))["code"] == "missing_authorization"
+    assert fake.calls == []
+
+    keys = _sde(tmp_path, "my_keycodes.ecp")
+    monkeypatch.setenv(egdb_module.AUTHORIZATION_ENV, keys)
+    assert egdb.create_gdb("SQL_SERVER", "h", "gis", **args)["ok"] is True
+    assert fake.calls[-1][2]["authorization_file"] == keys
+
+
+def test_egdb_point_in_time_connection_and_project_registration(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.pro import register
+
+    fake = _FakeArcpy()
+    egdb = _use(monkeypatch, fake)
+    common = dict(out_folder=str(tmp_path), out_name="c", database_platform="SQL_SERVER", instance="h",
+                  account_authentication="OPERATING_SYSTEM_AUTH")
+    assert egdb.create_connection(**common, version_type="POINT_IN_TIME")["code"] == "bad_argument"
+    assert egdb.create_connection(**common, date="2026-10-24 04:00:00")["code"] == "bad_argument"
+    calls = []
+    monkeypatch.setattr(register, "register_database", lambda p: calls.append(p) or {"added": True})
+    made = egdb.create_connection(**common, version_type="POINT_IN_TIME", date="2026-10-24 04:00:00",
+                                  register_in_project=True)
+    assert fake.calls[-1][2]["date"] == "2026-10-24 04:00:00"
+    assert made["data"]["project"] == {"added": True} and calls == [r"C:\out\conn.sde"]
+
+
+def test_egdb_upgrade_checks_by_default_and_disconnect_needs_confirm(tmp_path, monkeypatch):
+    fake = _FakeArcpy()
+    fake.ListUsers = lambda conn: [_NS(ID=7, Name="SDE")]
+    fake.DisconnectUser = lambda conn, users: fake.calls.append(("DisconnectUser", (conn, users), {}))
+    egdb = _use(monkeypatch, fake)
+    conn = _sde(tmp_path)
+    assert egdb.upgrade_gdb(conn)["ok"] is True
+    assert fake.calls[-1][1][1:] == ("PREREQUISITE_CHECK", "NO_UPGRADE")
+    assert egdb.upgrade_gdb(conn, upgrade=True)["code"] == "confirm_required"
+    # Esri's tool FAILS with ERROR 001046 on a current geodatabase; that is reported as up to date.
+    current = _FakeArcpy(described={conn: _NS(workspaceType="RemoteDatabase", currentRelease=True, release="3,0,0")})
+    egdb_current = _use(monkeypatch, current)
+    assert egdb_current.upgrade_gdb(conn)["data"]["up_to_date"] is True and current.calls == []
+    egdb = _use(monkeypatch, fake)
+
+    assert egdb.disconnect_users(conn)["code"] == "bad_argument"
+    assert egdb.disconnect_users(conn, users=["bob"])["code"] == "bad_argument"
+    assert egdb.disconnect_users(conn, all_users=True)["code"] == "confirm_required"
+    done = egdb.disconnect_users(conn, users=[12, 13], confirm=True)["data"]
+    assert fake.calls[-1] == ("DisconnectUser", (conn, [12, 13]), {}) and done["still_connected"][0]["id"] == 7
+
+
+def test_egdb_version_health_diagnoses_freely_and_repairs_only_when_confirmed(tmp_path, monkeypatch):
+    fake = _FakeArcpy()
+    egdb = _use(monkeypatch, fake)
+    conn = _sde(tmp_path)
+    assert egdb.version_health(conn)["ok"] is True and fake.calls[-1][0] == "DiagnoseVersionTables"
+    assert egdb.version_health(conn, scope="metadata")["ok"] is True
+    assert fake.calls[-1][0] == "DiagnoseVersionMetadata"
+    assert egdb.version_health(conn, action="repair")["code"] == "confirm_required"
+    assert egdb.version_health(conn, action="repair", scope="tables", confirm=True)["ok"] is True
+    assert fake.calls[-1][0] == "RepairVersionTables"
+    assert egdb.version_health(conn, action="explode")["code"] == "bad_argument"
+
+
+def test_egdb_manage_principal_sql_per_dbms_and_never_leaks_the_password(tmp_path, monkeypatch):
+    conn = _sde(tmp_path)
+    monkeypatch.setenv("NEW_PWD", "S3cr'et!")
+
+    fake = _dbms_fake("sqlserver")
+    egdb = _use(monkeypatch, fake)
+    assert egdb.manage_principal(conn, "drop_user", "editor1")["code"] == "confirm_required"
+    assert egdb.manage_principal(conn, "drop_user", "sde", confirm=True)["code"] == "bad_argument"
+    assert egdb.manage_principal(conn, "drop_user", "x; DROP TABLE t", confirm=True)["code"] == "bad_argument"
+    assert egdb.manage_principal(conn, "drop_user", "editor1", confirm=True)["ok"] is True
+    assert fake.sql_log[1:] == ["IF SCHEMA_ID('editor1') IS NOT NULL DROP SCHEMA [editor1]",
+                            "IF DATABASE_PRINCIPAL_ID('editor1') IS NOT NULL DROP USER [editor1]",
+                            "IF SUSER_ID('editor1') IS NOT NULL DROP LOGIN [editor1]"]
+    res = egdb.manage_principal(conn, "set_password", "editor1", password_env="NEW_PWD")
+    assert fake.sql_log[-1] == "ALTER LOGIN [editor1] WITH PASSWORD = N'S3cr''et!'"
+
+    # A logged-in user is refused BEFORE anything is dropped (SQL Server cannot drop a login in use).
+    busy = _dbms_fake("sqlserver", answers={"dm_exec_sessions": [[57], [58]]})
+    egdb = _use(monkeypatch, busy)
+    refused = egdb.manage_principal(conn, "drop_user", "editor1", confirm=True)
+    assert refused["code"] == "user_connected" and refused["sessions"] == [57, 58] and len(busy.sql_log) == 1
+    # ArcSDESQLExecute cannot run KILL (SQL Server: "cannot be used inside user transactions"), so the
+    # statements are handed to a DBA instead of being attempted.
+    assert refused["kill_sql"] == ["KILL 57;", "KILL 58;"] and not any("KILL" in x for x in busy.sql_log)
+    egdb = _use(monkeypatch, fake)
+    assert "S3cr" not in json.dumps(res)
+
+    fake = _dbms_fake("sqlserver", answers={"database_role_members": [["editor1"], ["viewer2"]]})
+    egdb = _use(monkeypatch, fake)
+    assert egdb.manage_principal(conn, "drop_role", "editors", confirm=True)["ok"] is True
+    assert fake.sql_log[1:] == ["ALTER ROLE [editors] DROP MEMBER [editor1]",
+                                "ALTER ROLE [editors] DROP MEMBER [viewer2]",
+                                "IF DATABASE_PRINCIPAL_ID('editors') IS NOT NULL DROP ROLE [editors]"]
+
+    # PostgreSQL: Create Database User grants privileges (PostGIS tables, the database) that block
+    # DROP ROLE, so DROP OWNED revokes them - only after proving the role owns no objects.
+    fake = _dbms_fake("postgresql", answers={"pg_class": [[0]]})
+    egdb = _use(monkeypatch, fake)
+    egdb.manage_principal(conn, "drop_user", "editor1", confirm=True)
+    egdb.manage_principal(conn, "set_password", "editor1", password_env="NEW_PWD")
+    assert fake.sql_log[1:] == ["DROP SCHEMA IF EXISTS editor1", "DROP OWNED BY editor1",
+                                "DROP ROLE IF EXISTS editor1", "ALTER ROLE editor1 WITH PASSWORD 'S3cr''et!'"]
+    fake = _dbms_fake("postgresql", answers={"pg_class": [[3]]})
+    egdb = _use(monkeypatch, fake)
+    owner = egdb.manage_principal(conn, "drop_user", "owner1", confirm=True)
+    assert owner["code"] == "owns_data" and len(fake.sql_log) == 1  # only the ownership query ran
+
+    # A refusal from the database (e.g. the schema still holds data) comes back, nothing is cascaded.
+    fake = _dbms_fake("postgresql", fail_on="DROP SCHEMA")
+    egdb = _use(monkeypatch, fake)
+    refused = egdb.manage_principal(conn, "drop_user", "owner1", confirm=True)
+    assert refused["code"] == "sql_failed" and "CASCADE" not in json.dumps(refused)
+
+
+def test_egdb_table_privileges_are_granular_but_only_for_simple_tables(tmp_path, monkeypatch):
+    conn = _sde(tmp_path)
+    fake = _dbms_fake("sqlserver", described={
+        "plain": _NS(name="GIS.DBO.parcels", isVersioned=False, isArchived=False, relationshipClassNames=[]),
+        "versioned": _NS(name="GIS.DBO.roads", isVersioned=True, isArchived=False, relationshipClassNames=[]),
+        "attached": _NS(name="GIS.DBO.poles", isVersioned=False, isArchived=False,
+                        relationshipClassNames=["GIS.DBO.poles__ATTACHREL"]),
+    })
+    egdb = _use(monkeypatch, fake)
+    assert egdb.table_privileges(conn, ["plain"], "editors", grant=["DROP"])["code"] == "bad_argument"
+    done = egdb.table_privileges(conn, ["plain"], "editors", grant=["select", "insert"], revoke=["delete"])
+    assert done["ok"] is True
+    assert fake.sql_log == ["GRANT SELECT, INSERT ON DBO.parcels TO editors", "REVOKE DELETE ON DBO.parcels FROM editors"]
+    for ds in ("versioned", "attached"):
+        res = egdb.table_privileges(conn, [ds], "editors", grant=["SELECT"])
+        assert res["code"] == "use_change_privileges", ds
+
+
+def test_egdb_cloud_preparation_follows_esri_and_masks_the_password(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.pro import egdb
+
+    def no_arcpy():
+        raise AssertionError("a dry run must not touch arcpy")
+
+    monkeypatch.setattr(egdb, "_arcpy", no_arcpy)
+    monkeypatch.setenv("SDE_PWD", "Cl0ud'Pwd")
+    rds = egdb.prepare_cloud_database("POSTGRESQL", "rds", sde_password_env="SDE_PWD")["data"]
+    assert rds["statements"] == ["CREATE ROLE sde LOGIN PASSWORD '********'", "GRANT rds_superuser TO sde",
+                                 "CREATE SCHEMA sde AUTHORIZATION sde"]
+    assert "Cl0ud" not in json.dumps(rds) and rds["executed"] is False
+    assert "azure_pg_admin" in egdb.prepare_cloud_database("POSTGRESQL", "AZURE")["data"]["statements"][1]
+    azure = egdb.prepare_cloud_database("SQL_SERVER", "AZURE_SQL_DATABASE")["data"]["statements"]
+    assert azure[0].startswith("CREATE USER sde WITH PASSWORD") and "GRANT VIEW DATABASE STATE TO sde" in azure
+    assert "GRANT KILL DATABASE CONNECTION TO sde" in azure
+    rds_sql = egdb.prepare_cloud_database("SQL_SERVER", "RDS")["data"]["statements"]
+    assert rds_sql[0].startswith("CREATE LOGIN sde") and rds_sql[-1] == "ALTER SERVER ROLE processadmin ADD MEMBER sde"
+    assert egdb.prepare_cloud_database("ORACLE", "RDS")["code"] == "bad_argument"
+    assert egdb.prepare_cloud_database("POSTGRESQL", "rds", execute=True)["code"] == "bad_argument"
+    blocked = egdb.prepare_cloud_database("POSTGRESQL", "rds", admin_connection=_sde(tmp_path),
+                                          sde_password_env="SDE_PWD", execute=True)
+    assert blocked["code"] == "confirm_required"
+
+
+def test_egdb_views_keywords_and_replica_schema_validate_first(tmp_path, monkeypatch):
+    fake = _FakeArcpy()
+    egdb = _use(monkeypatch, fake)
+    conn = _sde(tmp_path)
+    assert egdb.create_view(conn, "v_parcels", "DELETE FROM parcels")["code"] == "bad_argument"
+    assert egdb.create_view(conn, "v-parcels", "SELECT 1")["code"] == "bad_argument"
+    assert egdb.create_view(conn, "v_parcels", "SELECT objectid FROM dbo.parcels")["ok"] is True
+    assert egdb.config_keywords(conn, "import", str(tmp_path / "none.txt"))["code"] == "not_found"
+    assert egdb.config_keywords(conn, "export", str(tmp_path / "kw.txt"))["ok"] is True
+    assert egdb.replica_schema(conn, "export", str(tmp_path / "s.xml"))["code"] == "bad_argument"
+    assert egdb.replica_schema(conn, "compare", _sde(tmp_path, "s.xml"))["code"] == "bad_argument"
+    assert egdb.replica_schema(conn, "export", str(tmp_path / "s.xml"), replica_name="r1")["ok"] is True
+    assert [c[0] for c in fake.calls] == ["CreateDatabaseView", "ExportGeodatabaseConfigurationKeywords",
+                                          "ExportReplicaSchema"]
+
+
+def test_add_database_is_a_mutating_live_command(monkeypatch):
+    from arcgis_pro_salah_mcp.config import CONFIG
+    from arcgis_pro_salah_mcp.live import client, ops as live, policy
+
+    assert "add_database" in policy.MUTATING
+    sent = {}
+    monkeypatch.setattr(client, "post", lambda command, params=None: sent.update(
+        command=command, params=params) or {"ok": True, "data": {"registered": True}})
+    assert live.live_add_database(r"C:\p\gis.sde")["ok"] is True
+    assert sent == {"command": "add_database", "params": {"path": r"C:\p\gis.sde"}}
+    sent.clear()
+    monkeypatch.setattr(CONFIG, "bridge_readonly", True)
+    assert live.live_add_database(r"C:\p\gis.sde")["code"] == "readonly" and sent == {}
+
+
+def test_register_toolbox_names_the_add_in_version_for_databases(monkeypatch):
+    from arcgis_pro_salah_mcp.live import ops as live
+    from arcgis_pro_salah_mcp.pro import register
+
+    monkeypatch.setattr(register, "bridge_listening", lambda: True)
+    monkeypatch.setattr(live, "live_add_database", lambda p: {"ok": False, "error": "unknown command 'add_database'"})
+    old = register.register_database(r"C:\p\gis.sde")
+    assert old["added"] is False and "0.1.5" in old["hint"] and "Add Database" in old["manual"]
+
+
+
+# =====================================================================
+# Threading: one arcpy thread, a non-blocking server, background jobs, "CURRENT"
+# =====================================================================
+
+
+def test_arcpy_thread_runs_everything_on_one_thread_and_never_deadlocks():
+    import threading
+
+    from arcgis_pro_salah_mcp import arcpy_thread
+
+    ids = {arcpy_thread.submit(threading.get_ident).result() for _ in range(5)}
+    assert len(ids) == 1 and threading.get_ident() not in ids
+    # run() from ON the arcpy thread calls straight through instead of queueing behind itself.
+    nested = arcpy_thread.submit(lambda: arcpy_thread.run(threading.get_ident)).result(timeout=5)
+    assert nested in ids
+    assert arcpy_thread.status()["started"] is True
+
+
+def test_make_async_keeps_what_fastmcp_reads_from_the_function():
+    import asyncio
+    import inspect
+
+    from arcgis_pro_salah_mcp import arcpy_thread
+
+    def tool(path: str, limit: int = 3) -> dict:
+        """Doc kept."""
+        return {"path": path, "limit": limit}
+
+    runner = arcpy_thread.make_async(tool, "tool")
+    assert inspect.iscoroutinefunction(runner) and runner.__doc__ == "Doc kept."
+    assert list(inspect.signature(runner).parameters) == ["path", "limit"]
+    assert asyncio.run(runner(path="a", limit=1)) == {"path": "a", "limit": 1}
+
+
+def test_every_tool_is_async_and_arcpy_tools_run_on_the_arcpy_thread(monkeypatch):
+    import asyncio
+    import threading
+
+    from arcgis_pro_salah_mcp import arcpy_thread, server
+
+    tools = server.mcp._tool_manager._tools
+    assert all(t.is_async for t in tools.values())          # nothing blocks the event loop any more
+    assert tools["pro_buffer"].parameters["properties"]      # schemas untouched by the re-routing
+
+    monkeypatch.setattr(server.pro, "ping", lambda: {"ok": True, "data": {"thread": threading.get_ident()}})
+    res = asyncio.run(server.mcp.call_tool("pro_ping", {}))
+    blocks = res[0] if isinstance(res, tuple) else res
+    payload = json.loads(blocks[0].text)
+    assert payload["data"]["thread"] == arcpy_thread._STATE["thread_id"]
+
+
+def test_run_background_returns_at_once_and_keeps_the_result(monkeypatch):
+    import time
+
+    from arcgis_pro_salah_mcp import server
+
+    def slow():
+        time.sleep(0.3)
+        return {"ok": True, "data": "done"}
+
+    monkeypatch.setitem(server._ORIGINAL_FN, "pro_ping", slow)
+    started = time.perf_counter()
+    sub = server.pro_run_background("pro_ping")
+    assert sub["ok"] is True and time.perf_counter() - started < 0.2
+    job = sub["data"]["job_id"]
+    for _ in range(50):
+        status = server.pro_job_status(job)["data"]
+        if status["state"] in ("finished", "failed"):
+            break
+        time.sleep(0.05)
+    assert status["state"] == "finished" and status["result"] == {"ok": True, "data": "done"}
+    assert server.pro_run_background("live_ping")["code"] == "unknown_tool"
+    assert server.pro_run_background("pro_no_such_tool")["code"] == "unknown_tool"
+
+
+def test_current_means_the_project_open_in_pro(monkeypatch):
+    from types import SimpleNamespace
+
+    from arcgis_pro_salah_mcp.live import client
+    from arcgis_pro_salah_mcp.pro import ops
+
+    monkeypatch.setattr(client, "post", lambda *a, **k: {"ok": True, "data": {"project_path": r"C:\p\open.aprx"}})
+    assert ops._resolve_current("CURRENT") == r"C:\p\open.aprx"
+    assert ops._resolve_current(r"C:\other.aprx") == r"C:\other.aprx"
+
+    class FakeProject:
+        def __init__(self, path):
+            self.filePath = path
+
+    monkeypatch.setattr(ops, "_arcpy", lambda: SimpleNamespace(mp=SimpleNamespace(ArcGISProject=FakeProject)))
+    done = ops.execute_code("print(arcpy.mp.ArcGISProject('CURRENT').filePath)")
+    assert done["data"]["stdout"].strip() == r"C:\p\open.aprx" and "overwritten" in done["data"]["notes"][0]
+
+    monkeypatch.setattr(client, "post", lambda *a, **k: {"ok": False, "error": "bridge unreachable"})
+    dead = ops.execute_code('aprx = arcpy.mp.ArcGISProject("CURRENT")')
+    assert dead["ok"] is False and "outside Pro" in dead["error"]

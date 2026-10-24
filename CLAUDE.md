@@ -13,7 +13,7 @@ a different Esri technology:
   `webapp_create` (web app), `webapp_create_dashboard` (dashboard),
   `webapp_github_pipeline` (deploy to GitHub + Pages)
 
-119 tools in total, grouped into toolsets (see **Performance** below).
+156 tools in total, grouped into toolsets (see **Performance** below).
 
 Canonical agent workflow: **Pro (analyze) → Portal (publish) → WebApp (visualize)**.
 
@@ -37,6 +37,9 @@ $env:PYTHONPATH = "src"; python -m pytest tests/test_core.py -q
 arcgis-pro-salah-mcp                                  # package-relative imports need the install
 "...\arcgispro-py3\python.exe" -m arcgis_pro_salah_mcp.server
 
+# Regenerate llms.txt + llms-full.txt (tool reference read from the code) after changing any tool
+"...\arcgispro-py3\python.exe" scripts/build_llms.py
+
 # Build a sample.gdb to exercise the Pro tools (needs arcgispro-py3)
 "...\arcgispro-py3\python.exe" demos/setup_sample.py
 ```
@@ -46,7 +49,7 @@ dotnet build SalahAIBridge\SalahAIBridge.csproj -c Release
 # → bin\Release\net10.0-windows\SalahAIBridge.esriAddinX ; double-click to install.
 # ArcGIS Pro MUST be closed before reinstalling, or the old add-in stays loaded.
 # Pro installs it to  …\Documents\ArcGIS\AddIns\ArcGISPro\{6f3a1c2e-…}\  — check the
-# version in Add-In Manager (Config.daml `version`, currently 0.1.4) to confirm a reload.
+# version in Add-In Manager (Config.daml `version`, currently 0.1.6) to confirm a reload.
 ```
 
 ## Architecture
@@ -110,6 +113,16 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   (`itemType: "Notebook"`, relative `catalogPath`, absolute `pathHint`) per notebook.
   The SDK's public `Geoprocessing.OpenNotebook` takes no path, so we cannot open one in
   the live session; the user adds it via Catalog > Notebooks > Add and Open Notebook.
+- `pro/egdb.py` — the `egdb` toolset (35 `pro_egdb_*` tools): enterprise geodatabase create/enable,
+  connections, users/roles/privileges, versioning, archiving, administration, replication, cloud
+  preparation. Each user brings their OWN keycodes (`authorization_file` or env
+  `ARCGIS_EGDB_AUTHORIZATION_FILE`) - never put a license in the repo. Secrets are env-var NAMES. Arguments
+  are validated before `_arcpy()`; irreversible ops need `confirm=True` (`confirm_required`). The account
+  chores with no GP tool (drop user/role, set password, per-privilege GRANT/REVOKE) go through
+  `arcpy.ArcSDESQLExecute` with names validated by `_NAME` and passwords as escaped literals; the
+  statement shown to the caller is built separately with the password masked (replacing the raw
+  password missed its escaped form and leaked it - caught by a test). See **Enterprise geodatabase -
+  verified facts** below.
 - `pro/symbology.py` — AM/FM utility symbology (`ESRI AMFM Water` glyph font) built on
   CIM. A hand-built `CIMUniqueValueRenderer` inspected as valid yet drew nothing; the
   working approach lets `lyr.symbology.updateRenderer` build the renderer and only
@@ -123,6 +136,23 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   Keyword *prefix* matching, not substring ("age" must not match "acreage").
   Because it is pure it is unit-tested in `test_core.py` and also runs inside the
   publish script the ribbon shells out to.
+- `arcpy_thread.py` — **one thread owns arcpy** (the Python counterpart of Pro's MCT). Measured: with a
+  PostgreSQL gdb, `arcpy.ListVersions` (ERROR 87395), `ArcSDESQLExecute` (ERROR 87413) and
+  `arcpy.da.ListVersions` (TypeError(path)) fail on ANY thread other than the one that imported arcpy -
+  main thread included, every retry; SQL Server was fine. `bootstrap.start_warmup` submits the import to that
+  thread, `pipeline` jobs run there, and `server._route_tools()` re-points every registered sync tool: arcpy
+  `pro_*` tools -> `arcpy_thread.make_async` (single thread, serialised), the rest (`_NOT_ARCPY`, `live_*`,
+  `portal_*`, `webapp_*`) -> `asyncio.to_thread`. Reason for the second half: FastMCP calls a sync tool
+  directly on the event loop (`func_metadata.call_fn_with_arg_validation`), so one long call froze the server
+  and the calls behind it hit the client's ~1 min timeout (reported from a real Claude Desktop session).
+  Verified over real stdio: `pro_server_status` answered in 0.0 s during a 15 s call. Module-level tool
+  functions are untouched; `_ORIGINAL_FN` keeps them for `pro_run_background` (any `pro_*` tool as a job,
+  polled with `pro_job_status`). The first arcpy call after start waits for the import (~47 s measured with a
+  PostgreSQL connection).
+- `"CURRENT"`: `pro.ops._resolve_current` maps it to the open project's `.aprx` via the bridge's `ping`;
+  `execute_code` rewrites `ArcGISProject("CURRENT")` and returns a note (saves from here are overwritten when Pro
+  saves). After code changes the MCP CLIENT must be restarted: a real test ran a server started before the
+  egdb branch was checked out, so none of the new tools existed in it.
 - `bootstrap.py` — ArcPy discovery, `os.execv` re-exec under `arcgispro-py3`,
   and the **arcpy warm-up**. `prepare()` is called from `main()`.
   `running_under_arcgis_python()` is a *path* check on purpose: probing with
@@ -169,6 +199,10 @@ raises**: transport failures come back as `err("bridge unreachable: …")`.
 - **Tests must never reach a real bridge**: with the add-in running they could register temp files in the
   developer's project, so the autouse fixture in `tests/test_core.py` blocks `client.post` and the bridge
   probe for the DL and toolbox-registration tests.
+- **`add_database`** (`Commands/AddDatabaseCommand.cs`, add-in 0.1.5): same public route as add_toolbox for
+  `.sde` files / `.gdb` folders, verified against `GetItems<GDBProjectItem>()` (`ArcGIS.Desktop.Catalog`).
+  `pro_egdb_create_connection` calls it after writing the file (MCP wrapper default). Compiles; it has not
+  been run in a live Pro yet (Pro was closed when it was built).
 - **`add_toolbox`** (`Commands/AddToolboxCommand.cs`, add-in 0.1.4): registers an `.atbx`/`.tbx`/`.pyt`
   in the open project's Toolboxes via the PUBLIC `ItemFactory.Create` + `Project.AddItem`, verified
   against `GetItems<GeoprocessingProjectItem>()` (type lives in `ArcGIS.Desktop.GeoProcessing`).
@@ -176,6 +210,12 @@ raises**: transport failures come back as `err("bridge unreachable: …")`.
   confirmed by `GetItems<GeoprocessingProjectItem>`. Trap: the FIRST time a `.pyt` is loaded Pro shows a
   "trust the code source" dialog on the UI thread; every bridge command (even `ping`) then times out until
   the user clicks Trust, after which the pending call completes.
+- **`run_gp`** (`Commands/RunGpCommand.cs`, fixed in add-in 0.1.6): calling `Geoprocessing.MakeValueArray` /
+  `ExecuteToolAsync` straight from the HttpListener thread gave a NullReferenceException for EVERY tool in a
+  live Pro 3.7 (reproduced with CreateFolder; the tool never ran). Now: arguments via `QueuedTask.Run`, the
+  tool started on the UI dispatcher, retried without `AddOutputsToMap`, every attempt in `steps`. Built but not
+  yet run live (Pro was open; reinstalling needs it closed). `BridgeServer` errors now carry `where` (first
+  stack frame).
 - C# handlers must do all project/map/layout work inside `QueuedTask.Run(...)`
   (Main CIM Thread); the HttpListener callback is a worker thread.
 
@@ -216,13 +256,13 @@ anything here; several obvious ideas turned out to be wrong.
 | Opening an `.aprx` | 0.15 s cold, 0.01 s warm — **not** a bottleneck |
 | `Describe` / `ListFields` / `GetCount` | 73 / 172 / 189 ms |
 | one uncached `pro_describe_layer` | ~430 ms |
-| full tool schema, sent every request | 119 tools = **19.9k tokens** |
+| full tool schema, sent every request | 156 tools = **27.0k tokens** |
 
 The dominant cost is **round trips**, not ArcPy: every extra tool call is a full
 model inference. Four mechanisms address that:
 
-1. **Warm-up** (`bootstrap.start_warmup`) — imports arcpy on a daemon thread at
-   startup so the user's first call does not pay the 25 s. Disable with
+1. **Warm-up** (`bootstrap.start_warmup`) — imports arcpy on THE arcpy thread at
+   startup so the user's first call does not pay the 25 s (see `arcpy_thread.py`). Disable with
    `ARCGIS_SALAH_NO_WARMUP=1`.
 2. **`pro_context`** — project + maps + layers + schemas + counts + sample rows
    in ONE call. Measured 5.4 s cold / 1.2 s warm for 11 datasets.
@@ -233,13 +273,13 @@ model inference. Four mechanisms address that:
    use explicit invalidation plus a TTL (`ARCGIS_SALAH_CACHE_TTL`, default 300 s;
    0 disables). Plain files (shapefile, GeoTIFF) do use their own mtime.
 4. **`pro_pipeline` / `pro_job_submit`** — chain N geoprocessing steps in one
-   call (`{{prev}}`, `{{stepN}}` placeholders), or run them on a worker thread
-   and poll with `pro_job_status`.
+   call (`{{prev}}`, `{{stepN}}` placeholders), or run them as a job on the arcpy thread
+   and poll with `pro_job_status` (`pro_run_background` does the same for any `pro_*` tool).
 
 **Toolset gating.** `ARCGIS_SALAH_TOOLSETS` prunes tool groups at startup:
-`core,portal,webapp` takes 119 tools -> 56 and 19.9k -> 8.0k tokens. Groups:
+`core,portal,webapp` takes 156 tools -> 57 and 27.0k -> 8.2k tokens (`core,egdb`: 80, ~13.0k). Groups:
 `core` (always kept), `geoai`, `unet`, `schema`, `validate`, `authoring`,
-`live`, `portal`, `webapp`. `pro_toolsets` reports what is active.
+`egdb`, `live`, `portal`, `webapp`. `pro_toolsets` reports what is active.
 
 **Where notebook creation time actually goes** (measured, `-X importtime` + timers):
 writing a 32-cell notebook is **~5 ms** (compile + save) — not the bottleneck. The costs
@@ -304,6 +344,35 @@ toolbox, importing it with `arcpy.ImportToolbox`, and **running it on real data*
   Esri docs (https://doc.esri.com/en/arcgis-pro/latest/arcpy/geoprocessing_and_python/): a validator can
   call `isInputValueDerived()` ("tool runs inside a model and its input comes from another tool's output").
 
+## Enterprise geodatabase — verified facts
+Tested on ArcGIS Pro 3.7 against SQL Server Express (throwaway geodatabases created by
+`create_gdb`, then dropped) and PostgreSQL 18 (throwaway objects in an existing geodatabase, removed).
+Harness scripts were run outside the repo; `tests/test_core.py` holds the backend-free versions.
+
+- `Version.children` are Version OBJECTS and `Replica.datasets` are STRINGS (docs silent) - both were
+  normalised; the originals broke JSON serialisation / raised AttributeError.
+- `ReconcileVersions` compares names case-sensitively and silently drops mismatches ("target version has
+  no edit versions to reconcile with") while returning success; `BLOCKING_VERSIONS` is a compress mode,
+  not "these versions". Names are resolved via ListVersions and the LOG decides `reconciled`/`posted`.
+- DEFAULT is `dbo.DEFAULT` in a DBO-schema SQL Server gdb. `DBO_SCHEMA` was used for test gdbs on purpose:
+  `SDE_SCHEMA` would reuse the server-wide `sde` login that the developer's other gdbs depend on.
+- `EnableEnterpriseGeodatabase` on SQL Server must switch on READ_COMMITTED_SNAPSHOT; this process's own
+  cached connection was enough to block it even after `ClearWorkspaceCache`. With RCSI set beforehand by a
+  DBA it succeeds; the error now returns that statement.
+- POINT_IN_TIME: `GetCount` ignores the historical moment (current count); SearchCursor honours it. The
+  date is UTC for non-versioned archives (gdb_from_date is stored UTC) and server-local time for
+  traditional-versioned archives. Any date format worked (`historical_timestamp` parsed all four tried).
+- `UpgradeGDB` raises ERROR 001046 on a current gdb; `upgrade_gdb` checks `currentRelease` first.
+- `arcpy.ListFields` hides branch system fields; check INFORMATION_SCHEMA to prove branch registration.
+- SQL Server cannot DROP LOGIN while it has sessions; pooled ODBC sessions are invisible to `ListUsers`
+  (so `DisconnectUser` cannot reach them) and `ArcSDESQLExecute` cannot `KILL` (every statement runs in a
+  transaction; tried 4 ways). `manage_principal` checks `sys.dm_exec_sessions` first and returns `kill_sql`.
+- PostgreSQL: Create Database User grants privileges (PostGIS tables, the database) that block DROP ROLE;
+  `DROP OWNED BY` is run only after proving the role owns no relations/functions outside its own schema.
+- Esri: "Privileges on datasets in geodatabases must be granted or revoked using ArcGIS" - so
+  `table_privileges` refuses versioned / archived / attachment datasets (several tables + views).
+- The expired evaluation keycodes still passed "Validated authorization file" for creating/enabling.
+
 ## Conventions (follow when adding tools)
 1. **Result envelope.** Return `ok(data)` / `err(msg)` from `_result`; decorate
    the op with `@guard`.
@@ -335,13 +404,14 @@ listener (port 2026, no token) running inside Pro.
 | `ARCGIS_SALAH_CACHE_TTL` | `300` | Schema-cache TTL in seconds; `0` disables it |
 | `ARCGIS_SALAH_NO_WARMUP` | `0` | Truthy skips the background arcpy import |
 | `ARCGIS_SALAH_NO_REEXEC` | `0` | Truthy skips the `arcgispro-py3` re-exec |
+| `ARCGIS_EGDB_AUTHORIZATION_FILE` | — | `pro/egdb.py`: the user's OWN keycodes file (never committed) |
 
 The last two are *not* interchangeable despite naming the same thing — set both
 if you keep Pro somewhere non-standard.
 
 ## Tests
 `tests/test_core.py` must stay backend-free and green with **no ArcGIS installed**
-(91 tests). It covers the envelope/guard behavior, graceful ArcPy- and
+(117 tests). It covers the envelope/guard behavior, graceful ArcPy- and
 bridge-absent degradation, the `live/policy.py` rails, `pro/metadata.py` theme
 inference, both webapp generators, the cache (including the gdb-lock-file case
 and the TTL), pipeline placeholder substitution, the `.pyt` and `.atbx`
