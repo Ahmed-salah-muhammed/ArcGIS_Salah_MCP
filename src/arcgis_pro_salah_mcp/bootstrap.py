@@ -132,8 +132,12 @@ def _warm() -> None:
             _WARMUP.update(state="failed", seconds=round(elapsed, 2), error=str(exc))
 
 
-def start_warmup() -> threading.Thread | None:
-    """Import arcpy on a daemon thread. Idempotent; never raises."""
+def start_warmup():
+    """Import arcpy on THE arcpy thread (see ``arcpy_thread``). Idempotent; never raises.
+
+    It must be that thread and no other: with PostgreSQL geodatabases, arcpy calls made on any thread
+    other than the importing one failed (ERROR 87395 / 87413). Returns the Future, or None.
+    """
     global _WARMUP_THREAD
     with _WARMUP_LOCK:
         if _WARMUP_THREAD is not None:
@@ -141,10 +145,9 @@ def start_warmup() -> threading.Thread | None:
         if "arcpy" in sys.modules:
             _WARMUP.update(state="ready", seconds=0.0, error=None)
             return None
-        _WARMUP_THREAD = threading.Thread(
-            target=_warm, name="arcpy-warmup", daemon=True
-        )
-    _WARMUP_THREAD.start()
+        from . import arcpy_thread
+
+        _WARMUP_THREAD = arcpy_thread.submit(_warm, label="arcpy import (warm-up)")
     return _WARMUP_THREAD
 
 

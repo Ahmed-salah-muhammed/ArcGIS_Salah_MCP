@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -55,6 +56,7 @@ namespace SalahAIBridge
                 ["export_layout"] = new ExportLayoutCommand(),
                 ["get_request"]   = new GetRequestCommand(),
                 ["add_toolbox"]   = new AddToolboxCommand(),
+                ["add_database"]  = new AddDatabaseCommand(),
             };
         }
 
@@ -166,8 +168,14 @@ namespace SalahAIBridge
                 catch (Exception hx)
                 {
                     // Handler threw (e.g. "Layer 'cities' not found.") -> app-level
-                    // error envelope, still HTTP 200 per the protocol.
-                    WriteJson(ctx, 200, Err(hx.Message, hx.GetType().Name));
+                    // error envelope, still HTTP 200 per the protocol. "where" carries the first
+                    // stack frame: a bare "Object reference not set" from run_gp could not be
+                    // located without it.
+                    var err = Err(hx.Message, hx.GetType().Name);
+                    string where = (hx.StackTrace ?? "").Split(new[] { '\n' }).Select(l => l.Trim())
+                        .FirstOrDefault(l => l.StartsWith("at "));
+                    if (where != null) err["where"] = where;
+                    WriteJson(ctx, 200, err);
                 }
             }
             catch (Exception ex)

@@ -1,0 +1,64 @@
+# ArcGIS Pro Salah MCP
+
+> MCP server (FastMCP, stdio) that lets an AI agent drive the Esri ArcGIS stack end to end: ArcPy geoprocessing on .aprx projects and geodatabases (`pro_*`), the OPEN ArcGIS Pro session through a .NET add-in (`live_*`), publishing to ArcGIS Online / Enterprise (`portal_*`), and static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards (`webapp_*`). 156 tools in 10 toolsets. Every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}` (usually with a `code`).
+
+Key facts for an agent using these tools:
+
+- The server runs under ArcGIS Pro's own Python (`arcgispro-py3`). ArcPy cannot attach to a running ArcGIS Pro, so
+  `pro_*` tools work on files on disk. `"CURRENT"` as a project path is resolved to the project open in Pro through
+  the live bridge; saves made from the server to that `.aprx` are overwritten when Pro saves, so change the open
+  session with `live_*` tools. `live_*` needs ArcGIS Pro running with the SalahAIBridge add-in (0.1.6) listening on
+  127.0.0.1:2026; call `live_ping` first.
+- Start a session with `pro_context` (project, maps, layer schemas, counts and sample rows in one call).
+- Long work - creating a geodatabase, maintenance, replicas, many versions or users - can outlive the MCP client's
+  tool timeout (about a minute was observed). Run it with `pro_run_background` and poll `pro_job_status`.
+  `pro_server_status` answers at once and reports what the ArcPy thread is busy with. The first ArcPy call after
+  the server starts waits for the arcpy import (~25 s; ~47 s measured with a PostgreSQL connection).
+- Irreversible or disruptive operations refuse with `code: "confirm_required"` until they are called again with
+  `confirm=True`. Ask the user before passing it. `ARCGIS_BRIDGE_READONLY` makes every mutating `live_*` call
+  refuse with `code: "readonly"`.
+- Never put a password in a tool argument: tools take the NAME of an environment variable (`password_env`,
+  `dba_password_env`, ...). Enterprise geodatabase creation and enabling need the user's own ArcGIS Server /
+  Enterprise keycodes file: `authorization_file`, or `ARCGIS_EGDB_AUTHORIZATION_FILE` in the server environment.
+- Every tool schema is sent with every request (156 tools here). `ARCGIS_SALAH_TOOLSETS` keeps only some
+  groups, e.g. `core,egdb` or `core,portal,webapp` (`core` is always kept).
+- To turn a workflow into a reusable tool with parameters, use `pro_create_python_toolbox` (.pyt). `pro_create_model`
+  writes ModelBuilder models but only linear chains of feature-class tools are verified; it refuses the rest.
+- For deep-learning notebooks call `pro_dl_notebook` with only a goal first: it returns the questions to ask the
+  user (batch size, epochs, ...) and refuses to write the notebook until they are answered.
+
+## Docs
+
+- [README](README.md): install, MCP client setup (Claude Desktop, Google Antigravity), the ribbon, every toolset with examples, troubleshooting
+- [llms-full.txt](llms-full.txt): this file plus workflows, verified pitfalls, configuration and the complete tool reference
+- [CLAUDE.md](CLAUDE.md): architecture and verified facts for contributors (threading, enterprise geodatabase findings, toolbox authoring)
+- [docs/PROTOCOL.md](docs/PROTOCOL.md): wire contract of the live bridge (`live_*` <-> SalahAIBridge add-in)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): system architecture and component map
+
+## Toolsets
+
+- `core` (45 tools): everyday ArcPy on .aprx/.gdb files, one-call project context, pipelines, background jobs (always kept)
+- `live` (10 tools): the OPEN ArcGIS Pro session through the SalahAIBridge add-in
+- `egdb` (35 tools): enterprise geodatabases on SQL Server / PostgreSQL / Oracle: create, connect, users and privileges, versioning, archiving, replication, administration
+- `geoai` (17 tools): deep learning, vision-language and foundation models, interview-first notebook generator
+- `unet` (14 tools): Utility Network
+- `schema` (12 tools): domains, subtypes, attribute rules
+- `validate` (7 tools): topology and geometry checks
+- `authoring` (4 tools): .pyt Python toolboxes and ModelBuilder models
+- `portal` (9 tools): ArcGIS Online / ArcGIS Enterprise portal via the ArcGIS API for Python
+- `webapp` (3 tools): static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards, GitHub deploy
+
+## Source
+
+- [server.py](src/arcgis_pro_salah_mcp/server.py): every MCP tool wrapper; its one-line docstring is the tool's spec
+- [pro/ops.py](src/arcgis_pro_salah_mcp/pro/ops.py): core ArcPy operations, `pro_execute_code`, `"CURRENT"` resolution
+- [pro/egdb.py](src/arcgis_pro_salah_mcp/pro/egdb.py): enterprise geodatabase toolset
+- [arcpy_thread.py](src/arcgis_pro_salah_mcp/arcpy_thread.py): the single thread that owns ArcPy
+- [live/ops.py](src/arcgis_pro_salah_mcp/live/ops.py) and [live/policy.py](src/arcgis_pro_salah_mcp/live/policy.py): live bridge client and its safety rails
+- [SalahAIBridge/](SalahAIBridge/): the ArcGIS Pro .NET add-in (bridge server + Salah MCP ribbon)
+
+## Optional
+
+- [ROADMAP.md](ROADMAP.md): what is planned
+- [tests/test_core.py](tests/test_core.py): backend-free tests (run without ArcGIS)
+- [demos/setup_sample.py](demos/setup_sample.py): builds a sample geodatabase to try the tools

@@ -44,8 +44,28 @@ def _arcpy():
         ) from exc
 
 
+def _resolve_current(path: str) -> str:
+    """'CURRENT' -> the .aprx open in ArcGIS Pro, asked from the live bridge.
+
+    ArcPy in this server runs OUTSIDE Pro, so ``ArcGISProject("CURRENT")`` cannot work here (reported
+    from a real session, where the agent had to guess the project from file times). Edits saved to
+    that .aprx from here are overwritten when Pro saves it; change the open session with live_* tools.
+    """
+    if str(path).strip().upper() != "CURRENT":
+        return path
+    from ..live import client
+
+    reply = client.post("ping")
+    project = (reply.get("data") or {}).get("project_path") if reply.get("ok") else None
+    if not project:
+        raise ValueError("'CURRENT' means the project open in ArcGIS Pro, but the live bridge did not answer "
+                         f"({reply.get('error', 'no project')}). Pass the .aprx path instead: ArcPy here runs "
+                         "outside Pro and cannot attach to it.")
+    return project
+
+
 def _project(aprx_path: str):
-    return _arcpy().mp.ArcGISProject(aprx_path)
+    return _arcpy().mp.ArcGISProject(_resolve_current(aprx_path))
 
 
 def _get_map(aprx, map_name: str | None):
@@ -695,8 +715,20 @@ def execute_code(code: str) -> dict:
     import io
     import contextlib
 
+    import re
+
+    notes = []
+    current = re.compile(r"""ArcGISProject\(\s*(['"])CURRENT\1\s*\)""", re.IGNORECASE)
+    if current.search(code):
+        path = _resolve_current("CURRENT")
+        code = current.sub(lambda _m: f"ArcGISProject({path!r})", code)
+        notes.append(f"ArcGISProject('CURRENT') was replaced by the project open in Pro: {path}. Edits saved "
+                     f"to it from here are overwritten when Pro saves; use live_* tools for the open session.")
     namespace: dict[str, Any] = {"arcpy": arcpy}
     buffer_out = io.StringIO()
     with contextlib.redirect_stdout(buffer_out):
         exec(code, namespace)  # noqa: S102 - intentional escape hatch
-    return ok({"stdout": buffer_out.getvalue()})
+    out: dict[str, Any] = {"stdout": buffer_out.getvalue()}
+    if notes:
+        out["notes"] = notes
+    return ok(out)

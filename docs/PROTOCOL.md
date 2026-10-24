@@ -54,12 +54,16 @@ thread awaits that task, then serializes the result.
 | `add_layer` | `{ path }` | `{ added, map }` |
 | `export_layout` | `{ layout, out_path, dpi? }` | `{ output, dpi }` |
 | `add_toolbox` | `{ path }` | `{ path, registered, already_registered, steps[] }` |
+| `add_database` | `{ path }` | `{ path, registered, already_registered, steps[] }` |
 | `get_request` | `{ clear? }` | `{ pending, kind, text, created_at }` (what the user queued from the ribbon) |
 
 ### Notes per command
 - **`ping`** — cheap health/context read; safe to call often.
-- **`run_gp`** — uses `Geoprocessing.ExecuteToolAsync(tool, Geoprocessing.MakeValueArray(...))`;
-  on success, add the output dataset to the active map so the user sees it live.
+- **`run_gp`** — builds the arguments with `Geoprocessing.MakeValueArray` inside `QueuedTask.Run`, starts
+  `Geoprocessing.ExecuteToolAsync` on the UI dispatcher (add-in 0.1.6; calling both from the listener thread
+  failed with NullReferenceException for every tool), retries without adding outputs to the map, and
+  returns `{ tool, outputs[], via, steps[] }`.
+- **Errors** from any handler are `{ ok:false, error, type, where }`; `where` is the first stack frame.
 - **`zoom_to`** — `MapView.Active.ZoomToAsync(layer)` (or to the layer's
   selection when `selection: true`).
 - **`export_layout`** — resolve the layout by name from the active project,
@@ -67,6 +71,9 @@ thread awaits that task, then serializes the result.
 - **`add_toolbox`** (add-in 0.1.4+) — registers an existing `.atbx`/`.tbx`/`.pyt` in the open project's
   Toolboxes with the public `ItemFactory.Create` + `Project.AddItem`, verified against
   `Project.GetItems<GeoprocessingProjectItem>()`; attempts are returned in `steps`.
+- **`add_database`** (add-in 0.1.5+) — adds an existing `.sde` connection file (or a `.gdb`) to the open
+  project's Databases with the same public `ItemFactory.Create` + `Project.AddItem` route, verified against
+  `Project.GetItems<GDBProjectItem>()`. `pro_egdb_create_connection` calls it after writing the file.
 - **`get_request`** — returns the request the user parked from the ribbon (Create
   Web App prompt / Publish); `kind` is `web_app` or `publish`, `text` is what they
   typed. Pass `{"clear": true}` to consume it. Lets the agent pick up the user's intent.
@@ -78,7 +85,7 @@ client (`live/policy.py`) enforces two guard rails **before** sending a request,
 so a refused command never reaches the add-in:
 
 - **Read-only mode** — set env `ARCGIS_BRIDGE_READONLY` (truthy: `1/true/yes/on`)
-  to refuse every mutating command (`run_gp`, `add_layer`, `export_layout`, `add_toolbox`).
+  to refuse every mutating command (`run_gp`, `add_layer`, `export_layout`, `add_toolbox`, `add_database`).
   Reads and navigation (`ping`, `list_layers`, `query`, `zoom_to`) stay allowed.
   Refusal envelope: `{"ok": false, "error": "...", "code": "readonly"}`.
 - **Destructive confirmation** — `run_gp` can overwrite/delete data, so it
