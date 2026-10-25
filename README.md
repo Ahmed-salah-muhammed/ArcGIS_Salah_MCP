@@ -37,7 +37,7 @@ dashboard — in one conversation, or one ribbon click.
 | --- | --- | --- | --- |
 | **1 · Pro** | `pro_*` | ArcPy | Geoprocessing, one-call project context, geodatabase schema (domains/subtypes/attribute rules), topology validation, **GeoAI**, **Utility Network**, `.pyt` + ModelBuilder authoring |
 | **1b · Live** | `live_*` | .NET add-in (loopback HTTP) | Drive the **open** ArcGIS Pro session (list/zoom/query/run GP/export) |
-| **2 · Portal** | `portal_*` | ArcGIS API for Python | Publish layers to **ArcGIS Online / Portal**, manage items, build Web Maps |
+| **2 · Portal** | `portal_*` | ArcGIS API for Python | Everything in your **ArcGIS Online / Enterprise** org, signed in through ArcGIS Pro: items, publishing, sharing, hosted-layer data and schema, views, web maps, apps, users and **CSV onboarding**, groups, roles, geocoding, analysis, admin — plus the installed-library knowledge tool and Python/REST escape hatches |
 | **3 · WebApp** | `webapp_*` | ArcGIS Maps SDK for JS **5.0** | Generate a static **web app** *or* an interactive **dashboard**, then deploy to GitHub |
 
 **The signature workflow:** `Pro (analyze)` → `Portal (publish)` → `WebApp / Dashboard (visualize)` → `GitHub (deploy)`.
@@ -224,10 +224,11 @@ Claude or Antigravity):
 
 The agent (Claude or Antigravity) chains:
 
-1. `pro_buffer("sample.gdb/cities", "sample.gdb/cities_buf", "50 Kilometers")`
-2. `portal_connect(profile="agol")` → `portal_publish_layer("…cities_buf", "City Service Areas")` → item id
-3. `portal_create_webmap("City Service Areas", [item_id])` → webmap id
-4. `webapp_create_dashboard("City Service Areas", webmap_id=…)` → static dashboard
+1. `pro_analysis(operation="buffer", dataset="sample.gdb/cities", out="sample.gdb/cities_buf", distance="50 Kilometers")`
+2. one `pro_batch`: `portal_publish(path="…/sample.gdb/cities_buf", title="City Service Areas")` →
+   `portal_map(action="create", title="City Service Areas", layers=["{{call1.data.published_item.id}}"])`
+   (signed in through ArcGIS Pro automatically — no `portal_connect` needed)
+3. `webapp_create("City Service Areas", kind="dashboard", webmap_id=…)` → static dashboard
 
 Serve any generated folder locally:
 
@@ -246,7 +247,7 @@ labeling and popups you published.
 
 ### 1) Static apps (generated) — the quick path
 
-The `webapp_create` / `webapp_create_dashboard` tools (and the **Create Web App**
+The `webapp_create` tool (`kind=app` or `kind=dashboard`; and the **Create Web App**
 / **Create Dashboard** ribbon buttons) emit an opinionated, no‑build static site
 (ArcGIS Maps SDK for JS 5.0 + Calcite + map components). Give them a **Web Map
 item‑id** (or layer item‑ids) and they wire up the map, widgets, indicators and
@@ -261,8 +262,8 @@ custom Calcite panels, charts, tools and interaction logic, exactly to your spec
 
 **Typical flow:**
 
-1. **Publish** your data / web map (ribbon **Publish**, or `portal_publish_layer`
-   + `portal_create_webmap`) and copy the **item‑id** from your portal.
+1. **Publish** your data / web map (ribbon **Publish**, or `portal_publish`
+   + `portal_map action=create`) and copy the **item‑id** from your portal.
 2. In Claude, describe the app and hand it the item‑id, e.g.:
 
    > **You:** "Build a single‑page flood‑response app. Left: a Calcite panel with
@@ -405,17 +406,22 @@ and can flip on GitHub Pages for a live public URL.
 
 ## Authentication (Portal layer)
 
-Prefer a stored **profile** so credentials never live in code or chat. Once, from
-any Python with `arcgis` installed:
+**Nothing to set up if you are signed in to ArcGIS Pro.** Every `portal_*` tool signs in by itself, in this
+order:
 
-```python
-from arcgis.gis import GIS
-GIS("https://www.arcgis.com", username="you", password="…", profile="agol")
-```
+1. **ArcGIS Pro's sign-in** (`GIS("pro")`) — whatever portal Pro uses, ArcGIS Online or Enterprise, SSO/SAML
+   included. Measured: 1.0 s. At server start it happens in the background, so the first portal call is instant.
+2. A stored **profile** (`ARCGIS_PROFILE`, or `portal_connect(source="profile", profile=...)`) — credentials
+   live in the OS keyring. Create one once from any Python with `arcgis`:
+   `GIS("https://www.arcgis.com", username="you", password="…", profile="agol")`.
+3. `url` + `username` + `password_env` — the **name** of an environment variable holding the password. A
+   password is never a tool argument.
+4. `api_key_env`, then anonymous (public content only).
 
-Then set `ARCGIS_PROFILE=agol` (or pass `profile="agol"` to `portal_connect`).
-The ribbon's **Publish** button uses the account you're already signed into inside
-ArcGIS Pro (`GIS("pro")`), so no extra setup is needed there.
+`portal_connect(action="whoami")` shows who you are, your role and user type, and what the account can do
+(`can.publish_features`, `can.share_public`, `can.manage_users`, …). Named connections
+(`portal_connect(name="target", ...)`, then `connection="target"` on any tool) let content move between orgs.
+The ribbon's **Publish** button uses the same Pro sign-in.
 
 ---
 
@@ -443,99 +449,89 @@ You want to see **✓ CREATE OK** and **✓ PUSH OK**.
 
 ## Tools
 
-**156 tools in ten groups.** Every tool's schema is sent to the model on every
-request, so `ARCGIS_SALAH_TOOLSETS` lets you keep only the groups you need — see
-[Performance](#performance).
+**72 tools in 14 groups, plus 23 resources + 1 resource template and 11 prompts.** Related operations share one tool
+with an `action` argument — `pro_layer action=add|remove|rename|visibility|opacity`, `portal_item
+action=get|update|move|delete|export|…` — so the model chooses between fewer, clearer tools. A wrong action
+returns `code: "bad_action"` with the valid list; a missing argument is reported before ArcPy or arcgis is
+touched. `ARCGIS_SALAH_TOOLSETS` keeps only the groups you need — see [Performance](#performance).
 
-### What's new — notebooks, workflows and toolboxes
+### What's new — the ArcGIS Online / Enterprise layer, merged tools, batches, playbooks
 
-Two new tools and two upgraded ones. Together they cover "give me a notebook for this model" and
-"turn this workflow into a tool I can reuse".
+| What | Status | What you can now ask for |
+| --- | --- | --- |
+| **Portal layer** (22 tools, ArcGIS API for Python 2.4) | **New** | Anything in your org: search and manage items and folders, publish files / `.gdb` / feature classes / CSVs, share, clone between orgs, query and edit hosted layers, add fields, create filtered views, renderers and labels, web maps and scenes, Survey123 export, dashboard clone, StoryMaps, users / groups / roles, **CSV onboarding**, geocoding and analysis with credit estimates, org audit. |
+| **Sign-in through ArcGIS Pro** | **New** | Nothing to configure: if Pro is signed in (Online or Enterprise), the portal tools use it. |
+| **`portal_api` + `portal_python` + `portal_rest`** | **New** | *"Do X"* where no tool fits: the agent searches the **installed** arcgis library (signatures, docs, 66 deprecated symbols flagged with their replacements), inspects in read mode, then writes with your confirmation. |
+| **`pro_batch`** | **New** | Several tools of any layer in **one** round trip, results passed along (`{{call1.data.published_item.id}}`), in parallel or in the background. |
+| **Merged tools** | **Changed** | 156 → 72 tools. Non-portal schema 21.7k → 15.3k tokens (chars/4) with the same features. Old → new names are in the table below. |
+| **Playbooks, resources & prompts** | **New** | Playbooks via `pro_server action=guide` or `arcgis://guide/<topic>`; attach an item as context with `arcgis://portal/item/{item_id}`; prompts such as *plan_big_task*, *onboard_users_from_csv*, *org_audit*, *migrate_items_between_orgs*. |
+| **Safety rails** | **New** | `confirm_required` previews for anything irreversible, bulk, public, admin or credit-spending; an audit log of every portal write; secrets only as env-var names, masked everywhere. |
 
-And a new **enterprise geodatabase** toolset (`pro_egdb_*`, 35 tools + `live_add_database`): create or
-enable a geodatabase, connect it to Pro, users/roles/privileges, versioning, archiving, replication and
-maintenance — see [Enterprise geodatabase](#enterprise-geodatabase-egdb-toolset).
+**Playbooks, resources and prompts.** The 20 playbooks are reachable two ways: by the model itself with
+`pro_server(action="guide", topic="portal-users")` (no topic lists them — works in every client), and as
+MCP resources `arcgis://guide/<topic>` you can attach. The other resources are context worth attaching
+without a tool call: `arcgis://live/project` (the project open in Pro), `arcgis://portal/my-content` (your 50
+most recent items) and the template **`arcgis://portal/item/{item_id}`** (one item: card, sharing, every
+layer's fields, or a web map's layers). In Claude Code: `@arcgis-pro-salah:arcgis://portal/item/<id>`; Claude
+Code also gives the model tools to read resources. In Claude Desktop a resource reaches the chat when you
+attach it. Server status, toolsets and the arcgis module map are tools (`pro_server`, `portal_api`), not
+resources. Prompts (`/arcgis-pro-salah:<prompt>` in Claude Code) are saved workflows you pick; everything
+they do can also be asked for in plain words.
 
-| Tool | Status | What it does | What you can now ask for |
-| --- | --- | --- | --- |
-| **`pro_dl_notebook`** | **New** | Interviews you first (batch size, epochs, learning rate, chip size, model options), then writes a ready-to-run `.ipynb` into the open project's folder. 13 trainable `arcgis.learn` models plus Esri's pretrained *Building Change Detection*. | *"I want a notebook that detects buildings"*, *"…that classifies objects"*, *"…that finds change between two dates"*. It asks the questions instead of guessing, then you run the notebook cell by cell in Pro. |
-| **`live_add_toolbox`** | **New** (add-in 0.1.4) | Adds an existing `.atbx` / `.tbx` / `.pyt` to the **open** project's Toolboxes and confirms it landed. | A tool the agent just generated shows up in Catalog and the Geoprocessing pane without *Add Toolbox* by hand. |
-| **`pro_create_python_toolbox`** | **Upgraded** | The recommended way to turn a workflow into a tool with parameters. Steps take keyword arguments, `{{memory}}` for temporary in-memory results (deleted when the tool ends), and lists for multi-input tools like Intersect. Adds the toolbox to the open project. | *"Make a tool that clips my layer to a boundary, intersects it with another layer and exports the result"* — you get a tool with four parameters and progress messages. |
-| **`pro_create_model`** | **Upgraded** | Writes an editable ModelBuilder model. Now **refuses** (`unsupported_model`) the patterns that did not run in Pro 3.7 instead of writing a broken model, and points to the `.pyt` route. | A linear chain of feature-class tools (Buffer → Dissolve …) as a visual model. For anything else it tells you to use `pro_create_python_toolbox`. |
+<details>
+<summary><b>Old tool names → new</b> (click)</summary>
 
-Good to know:
+| Old | New |
+| --- | --- |
+| `pro_ping`, `pro_get_info`, `pro_server_status`, `pro_toolsets`, `pro_job_status` | `pro_server action=ping\|info\|status\|toolsets\|job` |
+| `pro_run_background`, `pro_job_submit` | `pro_batch background=true`, `pro_pipeline background=true` |
+| `pro_project_info`, `pro_list_layers`, `pro_save_project` | `pro_project action=info\|layers\|save` |
+| `pro_add_layer`, `pro_remove_layer`, `pro_rename_layer`, `pro_set_visibility`, `pro_set_opacity` | `pro_layer action=add\|remove\|rename\|visibility\|opacity` |
+| `pro_get_features`, `pro_sql`, `pro_select_by_expression`, `pro_layer_summary`, `pro_describe_layer`, `pro_field_statistics` | `pro_query action=rows\|count\|summary\|describe\|stats` |
+| `pro_add_field`, `pro_calculate_field` | `pro_field action=add\|calculate` |
+| `pro_buffer`, `pro_clip`, `pro_spatial_join`, `pro_dissolve`, `pro_merge`, `pro_reproject`, `pro_repair_geometry`, `pro_extract` | `pro_analysis operation=…` |
+| `pro_export_layer`, `pro_export_image`, `pro_export_pdf`, `pro_export_map_series` | `pro_export` (format from the extension) |
+| `pro_apply_categorized/graduated/utility/water_utility_symbology`, `pro_symbols` | `pro_symbology kind=…` |
+| 12 domain / subtype / attribute-rule tools | `pro_domain`, `pro_subtypes`, `pro_attribute_rules` (+ `pro_apply_schema`) |
+| 5 topology tools | `pro_topology action=rules\|describe\|create\|validate\|export_errors` |
+| 16 GeoAI tools | `pro_geoai_info`, `pro_geoai_text`, `pro_geoai_infer task=…`, `pro_geoai_train action=…` (+ `pro_dl_notebook`) |
+| 16 utility-network tools | `pro_un_describe`, `pro_un_author action=…`, `pro_un_topology`, `pro_un_trace`, `pro_un_subnetwork` |
+| `pro_toolbox_datatypes`, `pro_inspect_model` | `pro_toolbox_info what=datatypes\|model` |
+| 35 `pro_egdb_*` tools | `pro_egdb_setup`, `_connection`, `_principals`, `_privileges`, `_dataset`, `_versions`, `_admin`, `_replica` |
+| `live_list_layers`, `live_query`, `live_zoom_to`, `live_add_layer` | `live_map action=layers\|query\|zoom\|add_layer` |
+| `live_add_database`, `live_add_toolbox` | `live_add_to_project` (by extension) |
+| `portal_whoami`, `portal_search_items`, `portal_get_item`, `portal_publish_layer`, `portal_share_item`, `portal_create_webmap`, `portal_set_layer_symbology/labeling` | `portal_connect action=whoami`, `portal_search`, `portal_item action=get`, `portal_publish`, `portal_share`, `portal_map action=create`, `portal_layer_schema action=renderer\|labels` |
+| `webapp_create_dashboard` | `webapp_create kind=dashboard` |
 
-- **What was verified.** A Clip → Intersect → Export `.pyt` ran on real data and matched an independent
-  arcpy result (3 rows, area 9000.0). `live_add_toolbox` registered a generated `.pyt` in a live Pro 3.7
-  project. Generated notebooks compile, pass `nbformat.validate`, and their setup cells ran; the model
-  training itself was **not** run end to end.
-- **Notebooks are added by hand.** Neither `arcpy` nor the public SDK can add a notebook to the open
-  project: Catalog pane → right-click **Notebooks** → **Add and Open Notebook**.
-- **First `.pyt` load asks to trust the code.** Pro shows a dialog; until you click **Trust**, every
-  `live_*` call times out, and the toolbox is added as soon as you do.
-- **ModelBuilder limits.** Multi-input tools (Intersect, Union, Merge …) and folder/file/layer
-  intermediates (e.g. Export → Train → Detect) did not validate, and canvas Groups cannot be generated —
-  use the `.pyt` route for those.
-- **Needs add-in 0.1.4** for `live_add_toolbox`: close Pro, then double-click the `.esriAddinX`.
+</details>
 
-### Core — analysis & speed (`pro_*`)
-
-Start with **`pro_context`**: one call returns the project, its maps, every
-layer's schema, row counts, sample rows and an inferred theme. It replaces the
-`list_layers` → `describe_layer` → `get_features` round trip that used to make
-simple questions slow.
+### Core — analysis & speed (`core`, always on)
 
 | Tool | What it does |
 | --- | --- |
-| **`pro_context`** | Whole project/workspace in ONE call — start here |
-| **`pro_find_layers`** | "Which layer has population data?" without reading every schema |
-| **`pro_sql`** | Attribute query returning the matching **rows** |
-| **`pro_pipeline`** | Chain N geoprocessing tools in one call (`{{prev}}`, `{{stepN}}`) |
-| **`pro_job_submit`** / `pro_job_status` | Run long work in the background, poll for the result |
-| **`pro_run_background`** | Run ANY `pro_*` tool as a background job, so it never hits the client's tool timeout |
-| **`pro_server_status`** | arcpy warm-up state and schema-cache hit rate |
-| **`pro_toolsets`** | Which tool groups are active |
+| **`pro_context`** | Whole project/workspace in ONE call (maps, schemas, counts, sample rows, themes) — start here |
+| `pro_find_layers` | "Which layer has population data?" without reading every schema |
+| `pro_project` | info / layers / save of an `.aprx` (`"CURRENT"` = the project open in Pro) |
+| `pro_layer` | add / remove / rename / visibility / opacity |
+| `pro_query` | rows / count / summary / describe / stats of a dataset |
+| `pro_field` | add / calculate a field |
+| `pro_analysis` | buffer, clip, spatial join, dissolve, merge, reproject, repair, extract |
+| `pro_symbology` | categorized, graduated, AM/FM utility glyphs, the whole water-utility look |
+| `pro_export` | a dataset to a file, a layout to PDF/PNG/JPG, a map series to one PDF |
+| `pro_run_gp` / `pro_execute_code` | any GP tool by name / arbitrary ArcPy |
+| **`pro_pipeline`** | N GP tools in one call, outputs chained (`{{prev}}`, `{{stepN}}`); `background=true` |
+| **`pro_batch`** | N tools of ANY layer in one call; `parallel`, `background`, `{{callN.data…}}` references |
+| **`pro_server`** | status (answers instantly, even during a long call) / job polling / toolsets / info / ping |
 
-Plus the original ArcPy surface: ping, get_info, project_info, save_project,
-list_layers, add_layer, remove_layer, rename_layer, set_visibility,
-layer_summary, describe_layer, get_features, select_by_expression, add_field,
-calculate_field, field_statistics, buffer, clip, spatial_join, dissolve, merge,
-reproject, repair_geometry, extract, apply_categorized_symbology,
-apply_graduated_symbology, set_opacity, export_layer, export_image, export_pdf,
-export_map_series, run_gp, execute_code.
+### Schema, validation, GeoAI, Utility Network, authoring
 
-### Schema — domains, subtypes, attribute rules (`schema` toolset)
-
-`pro_list_domains`, `pro_create_domain`, `pro_assign_domain`, `pro_delete_domain`,
-`pro_describe_subtypes`, `pro_set_subtypes`, `pro_describe_attribute_rules`,
-`pro_add_attribute_rule`, `pro_evaluate_rules`, `pro_toggle_attribute_rules`,
-`pro_delete_attribute_rule`, and **`pro_apply_schema`** — a whole schema
-(domains + subtypes + rules across many tables) applied in ONE call.
-
-### Validation — topology & geometry (`validate` toolset)
-
-`pro_topology_rules` (the 31 valid rule strings), `pro_describe_topology`,
-`pro_create_topology` (create + add classes + rules + validate in one call),
-`pro_validate_topology`, `pro_export_topology_errors`, `pro_check_geometry`, and
-**`pro_validate_all`** — "is my data clean?" answered in one call.
-
-### GeoAI — deep learning, VLMs, foundation models (`geoai` toolset)
-
-| Tool | What it does |
+| Group | Tools |
 | --- | --- |
-| **`pro_geoai_check_environment`** | Image Analyst licence, torch, CUDA — **call this first** |
-| **`pro_geoai_detect_by_text`** | Open-vocabulary detection from a plain-English prompt |
-| **`pro_geoai_text_to_layer`** | Prompt → detections → NMS → finished layer, one call |
-| **`pro_geoai_generate_embeddings`** | Embed imagery with a vision foundation model |
-| **`pro_geoai_find_similar`** | "More like this" — label one example, retrieve the rest |
-| **`pro_geoai_extract_with_foundation_models`** | Esri's pretrained models, infer + post-process |
-| `pro_geoai_detect_objects` | Run a trained `.dlpk` detection model |
-| `pro_geoai_classify_pixels` / `pro_geoai_classify_objects` | Segmentation / feature labelling |
-| `pro_geoai_detect_change` | Bi-temporal change detection |
-| `pro_geoai_export_training_data` / `pro_geoai_train_model` | Build and train your own model |
-| `pro_geoai_compute_accuracy` | mAP / precision / recall against ground truth |
-| `pro_geoai_train_and_detect` | Labels → chips → model → detections, one call |
-| `pro_geoai_describe_model` / `pro_geoai_model_types` | Inspect a `.dlpk`; list valid model types |
+| `schema` | `pro_domain` (list/create/assign/delete), `pro_subtypes` (describe/set), `pro_attribute_rules` (describe/add/evaluate/enable/disable/delete), **`pro_apply_schema`** (a whole schema in one call) |
+| `validate` | `pro_topology` (rules/describe/create/validate/export_errors), `pro_check_geometry`, **`pro_validate_all`** ("is my data clean?") |
+| `geoai` | `pro_geoai_info` (environment/model/model_types — call first), `pro_geoai_text` (detect from a sentence), `pro_geoai_infer` (detect, classify pixels/objects, change, embeddings, similar, foundation models), `pro_geoai_train` (export chips, train, accuracy, train-and-detect), `pro_dl_notebook` |
+| `unet` | `pro_un_describe` (model / trace types), `pro_un_author` (build from a spec, or one piece at a time), `pro_un_topology`, `pro_un_trace` (add_locations / all 10 trace types), `pro_un_subnetwork` |
+| `authoring` | **`pro_create_python_toolbox`** (workflow → `.pyt` tool, preferred), `pro_create_model` (ModelBuilder, linear feature-class chains only), `pro_toolbox_info` |
 
 ### Deep-learning notebooks — interview first, then a script (`geoai` toolset)
 
@@ -599,14 +595,6 @@ Add it by hand: Catalog pane, right-click **Notebooks → Add and Open Notebook*
 > What was **not**: the training and inference cells have never run on real labelled
 > data here — there is no labelled-buildings dataset and no CUDA GPU on this machine.
 
-### Utility Network (`unet` toolset)
-
-`pro_un_describe` (the whole model in one read), `pro_un_build` (author a network
-from one declarative spec), `pro_un_create`, `pro_un_add_domain_network`,
-`pro_un_add_tier`, `pro_un_add_rule`, `pro_un_add_network_attribute`,
-`pro_un_add_category`, `pro_un_add_terminal_configuration`, `pro_un_topology`
-(enable/disable/validate/verify/repair/analyze), `pro_un_add_trace_locations`,
-**`pro_un_trace`** (all 10 trace types), `pro_un_subnetwork`, `pro_un_trace_types`.
 
 ### Toolbox authoring (`authoring` toolset)
 
@@ -623,25 +611,24 @@ chains of feature-class tools** are verified to run. It refuses (`code="unsuppor
 did not: multi-input tools (Intersect/Union/Merge...) fed from a reference, and folder/file/layer
 intermediates such as an Export -> Train -> Detect deep-learning chain. `allow_unverified=True`
 overrides it if you hold a Pro-authored model of the same chain to match. Canvas Groups cannot be
-generated. `pro_inspect_model` reads any `.atbx` back (Esri's own included);
-`pro_toolbox_datatypes` lists valid parameter datatypes.
+generated. `pro_toolbox_info what=model` reads any `.atbx` back (Esri's own included);
+`pro_toolbox_info what=datatypes` lists valid parameter datatypes.
 
 ### Enterprise geodatabase (`egdb` toolset)
 
-35 tools for the whole life of an enterprise geodatabase on **SQL Server, PostgreSQL and Oracle**:
+8 tools (each with an `action`) for the whole life of an enterprise geodatabase on **SQL Server, PostgreSQL and Oracle**:
 create it, connect to it from Pro, manage users and privileges, version, archive, replicate, and
 keep it healthy.
 
-| Stage | Tools | What you can ask for |
+| Stage | Tool (`action`) | What you can ask for |
 | --- | --- | --- |
-| Create | `pro_egdb_create`, `pro_egdb_enable`, `pro_egdb_prepare_cloud_database` | *"Create an enterprise geodatabase called GIS on my SQL Server"*, *"enable a geodatabase in this Azure SQL / RDS PostgreSQL database"* (the cloud tool returns Esri's required SQL and can run it). |
-| Connect | `pro_egdb_create_connection`, `pro_egdb_describe`, `live_add_database` | A `.sde` file, added to the open project's **Databases**; pinned to a version, a historical marker, a moment in time, or a branch connection. |
-| Users & privileges | `pro_egdb_create_user`, `pro_egdb_create_role`, `pro_egdb_change_privileges`, `pro_egdb_table_privileges`, `pro_egdb_manage_principal` | Create users/roles; give view (SELECT) or edit privileges; grant SELECT / INSERT / UPDATE / DELETE **one by one** on simple tables; change a password; drop a user or role. |
-| Prepare data | `pro_egdb_prepare_dataset`, `pro_egdb_create_view` | Register with the geodatabase, Global IDs, editor tracking, attachments; database views. |
-| Versioning | `register_versioned`, `create_version`, `alter_version`, `list_versions`, `reconcile_post`, `delete_version`, `unregister_versioned` (all `pro_egdb_*`) | Traditional versioning end to end; branch registration through a BRANCH connection. |
-| Archiving | `pro_egdb_enable_archiving` | Turn feature history on/off; read it back with a point-in-time connection. |
-| Administration | `connected_users`, `disconnect_users`, `accept_connections`, `maintenance`, `upgrade`, `version_health`, `config_keywords` (all `pro_egdb_*`) | Who is connected, kick sessions, block connections before maintenance, compress/analyze/rebuild, check or run an upgrade, diagnose/repair version tables, export/import storage keywords. |
-| Replication | `create_replica`, `list_replicas`, `synchronize`, `export_changes`, `import_message`, `export_acknowledgement`, `replica_schema`, `unregister_replica` (all `pro_egdb_*`) | One-way / two-way / check-out replicas, connected and disconnected (message-file) sync, keeping replica schemas in step. |
+| Create | `pro_egdb_setup` (create / enable / prepare_cloud / upgrade) | *"Create an enterprise geodatabase called GIS on my SQL Server"*, *"enable a geodatabase in this Azure SQL / RDS PostgreSQL database"* (prepare_cloud returns Esri's required SQL and can run it), *"can it be upgraded?"* |
+| Connect | `pro_egdb_connection` (create / describe), `live_add_to_project` | A `.sde` file, added to the open project's **Databases**; pinned to a version, a historical marker, a moment in time, or a branch connection. |
+| Users & privileges | `pro_egdb_principals` (create_user / create_role / drop_user / drop_role / set_password), `pro_egdb_privileges` | Create users/roles; give view (SELECT) or edit privileges; or grant SELECT / INSERT / UPDATE / DELETE **one by one** on simple tables (`grant` / `revoke` lists); change a password; drop a user or role. |
+| Prepare data | `pro_egdb_dataset` (prepare / register_versioned / unregister_versioned / archiving) | Register with the geodatabase, Global IDs, editor tracking, attachments; traditional or branch versioning; feature history on/off. |
+| Versioning | `pro_egdb_versions` (list / create / alter / delete / reconcile_post / health) | Traditional versioning end to end; diagnose/repair version tables. |
+| Administration | `pro_egdb_admin` (connected_users / disconnect / accept_connections / block_connections / maintenance / create_view / config_keywords) | Who is connected, kick sessions, block connections before maintenance, compress/analyze/rebuild, database views, storage keywords. |
+| Replication | `pro_egdb_replica` (create / list / synchronize / export_changes / import_message / export_acknowledgement / unregister / schema_export / schema_compare / schema_import) | One-way / two-way / check-out replicas, connected and disconnected (message-file) sync, keeping replica schemas in step. |
 
 **Bring your own license and passwords.** Nothing license-related ships with the code. Pass your own
 ArcGIS Server/Enterprise keycodes file as `authorization_file`, or set it once in the MCP server's
@@ -664,7 +651,7 @@ first): deleting versions or replicas, unregistering versioned data, blocking or
 upgrading, repairing version tables, dropping users/roles, reconcile with `delete_versions`.
 
 **What was verified** (ArcGIS Pro 3.7). On SQL Server Express, in throwaway geodatabases that
-`pro_egdb_create` itself created and that were dropped afterwards: every tool above ran, including a
+`pro_egdb_setup action=create` itself created and that were dropped afterwards: every tool above ran, including a
 real edit in a child version reconciled and posted into its parent, one-way replication with connected
 and disconnected sync, replica-schema export/compare/import, a point-in-time connection returning the
 older rows, branch registration, enabling a plain database, granular grants checked in
@@ -685,7 +672,7 @@ checked for syntax only (SQL Server `SET PARSEONLY`, PostgreSQL inside a rolled-
 - On a point-in-time connection, **`GetCount` ignores the moment** (returns today's count) while a
   cursor returns the historical rows; and the moment is read as **UTC** for non-versioned archives but
   as **server-local time** for traditional-versioned ones.
-- `UpgradeGDB` *fails* on a current geodatabase (`ERROR 001046`); `pro_egdb_upgrade` reports
+- `UpgradeGDB` *fails* on a current geodatabase (`ERROR 001046`); `pro_egdb_setup action=upgrade` reports
   `up_to_date` instead.
 - A SQL Server login that still has sessions cannot be dropped, and those sessions may be pooled
   connections that `connected_users` never shows. `ArcSDESQLExecute` cannot end them (it wraps every
@@ -703,56 +690,104 @@ Geodatabase Connection Properties), and database-level backup/restore.
 
 ### Live (`live_*`) — the OPEN Pro session via the .NET bridge
 
-ping, list_layers, zoom_to, query, run_gp, add_layer, export_layout, get_request,
-**add_database** (puts a `.sde` connection or `.gdb` into the open project's Databases — needs add-in
-0.1.5+), **add_toolbox** (puts an `.atbx`/`.tbx`/`.pyt` — e.g. a model from `pro_create_model` — into the
-open project's Toolboxes; verified on Pro 3.7).
+`live_ping`, `live_map` (layers / query / zoom / add_layer), `live_run_gp` (confirm; add-in 0.1.6+),
+`live_export_layout`, `live_get_request` (what you queued from the ribbon), **`live_add_to_project`** (a `.sde`
+/ `.gdb` into the open project's Databases — add-in 0.1.5+; an `.atbx` / `.tbx` / `.pyt` into its Toolboxes —
+add-in 0.1.4+, verified on Pro 3.7).
 
-### Portal (`portal_*`)
+### Portal (`portal_*`) — ArcGIS Online / Enterprise through the ArcGIS API for Python
 
-connect, whoami, publish_layer, search_items, get_item, create_webmap,
-set_layer_symbology, set_layer_labeling, share_item.
+Signs in through ArcGIS Pro by itself (see [Authentication](#authentication-portal-layer)). Built on the
+installed arcgis **2.4.3**, every signature read with `inspect`, no deprecated calls (`Folder.add` instead of
+`content.add`, `item.sharing` instead of `item.share`, `folders.create` instead of `create_folder`).
+
+| Group | Tools | What you can ask for |
+| --- | --- | --- |
+| `portal_base` | `portal_connect` (connect/whoami/list/disconnect), `portal_search`, `portal_item` (get, data, update, move, copy, protect, delete, dependencies, download, **export** → downloaded, reassign, usage), `portal_folders`, **`portal_publish`**, `portal_share`, `portal_clone` | *"Publish this CSV / shapefile / gdb / feature class"*, *"export my layer to a file geodatabase"*, *"share these with the QA group"*, *"copy these items into the other org"* |
+| `portal_data` | `portal_layer_query` (describe, paged query, count, stats), `portal_layer_edit` (edit with dry-run diff, calculate, append/upsert, truncate), `portal_layer_schema` (add/delete field, capabilities, **renderer from the data**, labels, raw definition, **filtered read-only view**, overwrite) | *"Add a STATUS field and set it to 'new' where it is empty"*, *"make a read-only view of POP > 50 with only NAME and POP"* |
+| `portal_maps` | `portal_map` (create from items/URLs with the org basemap, auto popups and a renderer; describe; add/remove layers; popup; renderer; filter; basemap; web scene), `portal_apps` (Survey123 info/export, dashboard clone-and-remap, StoryMap, dependency graph) | *"A web map of that view coloured by population"*, *"export my survey's data to CSV"* |
+| `portal_admin` | `portal_users` (search/get/create/update_access/disable/enable/delete/transfer), **`portal_onboard`** (CSV template → validate → run → report), `portal_groups`, `portal_roles` (roles, presets like *GIS Specialist*, user types, privileges), `portal_admin` (org summary, credits, usage, audit CSV, licenses, history, Enterprise servers/services/logs, notebooks, this server's audit log) | *"Onboard these 50 users from the CSV"*, *"who never logged in?"* |
+| `portal_analysis` | `portal_geocode` (single / reverse / suggest free; **batch** with a credit estimate), `portal_analysis` (hosted spatial analysis: list, describe, estimate, run; any GP service) | *"Geocode this address table"* — it tells you the credits first |
+| knowledge + escape hatches | `portal_api` (search / doc / members of the INSTALLED library, deprecations + replacements, version, module map), `portal_python` (read mode by default; write mode needs confirm and is audited; sessions), `portal_rest` (raw REST on the portal's own hosts) | Anything no tool covers |
+
+**CSV onboarding** follows the rules of the `bulk_add_users.py` script it was ported from: every row validated
+first (one bad row blocks the run); role names and user types resolved to IDs; user type set **before** the role;
+nobody created directly as Administrator (created as User, then promoted, flagged in the preview); each account
+re-read after the write; preset roles created only when the CSV uses them; ArcGIS Online without a password sends
+an email invitation; the report CSV never contains passwords; UTF-8 with BOM so Arabic names survive Excel.
+
+**Confirm first:** deleting items/folders/groups/users/roles, sharing publicly, bulk edits (deletes, calculate,
+append, truncate), schema deletes, user/role/admin changes, onboarding runs, clones, notebook runs, service
+start/stop, credit-spending geocoding/analysis, `portal_python` write mode and non-read REST POSTs all return
+`code: "confirm_required"` with a preview first. Low-risk additive writes (upload, add field, folder, private
+group, view, web map) run directly. Every write lands in the audit log
+(`%LOCALAPPDATA%\arcgis_pro_salah_mcp\audit.jsonl`).
+
+**What was verified live** (a real ArcGIS Online organization, a non-admin Publisher account signed in
+through Pro; throwaway
+`mcp_test_*` items in its own content, kept private, deleted afterwards and checked gone): sign-in through Pro,
+search, folders, roles, user types (403 → aliases), get user, `portal_api` search/doc, `portal_python` read +
+write refused, `portal_rest`, org summary, single geocode (free), batch geocode refused without confirm,
+parallel batch; then publish a CSV → describe → query → stats → add field → dry-run edit → updates + adds →
+delete refused, then confirmed → calculate → unique renderer → labels → **filtered view** (7 of 12 rows, 2
+visible fields) → web map from the view with class breaks → add/remove layer, popup, basemap by alias →
+dependency graph → update / protect / delete refused / unprotect → **export to File Geodatabase and download** →
+private group share/unshare → public sharing refused → clone preview → analysis credit estimate → batch with a
+reference → onboarding template and validation of the sample CSV. **Not run live** (no admin rights / would
+spend credits): creating users and roles, admin reports, Enterprise server tools, paid geocoding and analysis —
+those are covered by mocked unit tests.
+
+**Two arcgis 2.4.3 bugs found and worked around:** `create_view(view_layers=[0])` (typed `list[int]`) crashes
+reading `.properties` from the int, and `create_view(visible_fields=…, query=…)` reads the new view's layers
+before they exist — both after the view item was created. The tool creates the view plain, waits for its layer,
+then applies the filter and visible fields itself; if anything fails it returns the ids of what was created.
 
 ### WebApp (`webapp_*`)
 
-create (static app), **create_dashboard** (interactive dashboard),
-**github_pipeline** (deploy to GitHub + Pages).
+`webapp_create` (`kind=app` — map + widgets; `kind=dashboard` — live indicators, category breakdown and a
+features-in-view list), `webapp_github_pipeline` (deploy to GitHub + Pages).
 
 ---
 
 ## Performance
 
-Measured on a real ArcGIS Pro 3.x install:
+Measured on a real ArcGIS Pro 3.7 install:
 
 | Operation | Cost |
 | --- | --- |
-| `import arcpy` | **25.1 s**, once per process |
-| `Describe` + `ListFields` + `GetCount` (one `describe_layer`) | ~430 ms |
-| Repeat `describe_layer`, cached | **1 ms** |
+| `import arcpy` | **25.1 s**, once per process — done in the background at start-up |
+| `import arcgis` (ArcGIS API for Python) | 17 s after arcpy, 33-60 s cold — background too, when a portal toolset is on |
+| Sign-in through Pro (`GIS("pro")`) | **1.0 s** |
+| Portal search | 0.2-0.6 s |
+| Index of the installed arcgis library | 13 s, once per arcgis version (was 256 s before `arcgis.learn` / `arcgis.map.dataclasses` were skipped); then a disk cache, **0.1 s** |
+| `Describe` + `ListFields` + `GetCount` | ~430 ms; cached repeat **1 ms** |
 | `pro_context` over an 11-layer geodatabase | 5.4 s cold, 1.2 s warm |
-| `field_statistics` on 13.5k rows | 329 ms → 184 ms (numpy) |
-| Full tool schema, every request | 156 tools ≈ 27.0k tokens |
+| Tool schema, every request | 72 tools ≈ 23.6k tokens (chars/4) |
 
-The server imports arcpy on a background thread at startup, so your **first**
-request no longer pays the 25 s. Schema reads are cached with a TTL, and
-`get_features` drops geometry fields by default.
+The biggest cost is the **round trip** — every tool call is a full model inference. So: `pro_context` reads a
+whole project in one call, `pro_pipeline` chains GP tools, and **`pro_batch`** runs several tools of any layer in
+one call (in parallel when they are independent). Long work goes `background=true` and is polled with
+`pro_server(action="job")`, so nothing hits the client's ~1 minute tool timeout. `pro_server(action="status")`
+always answers instantly.
 
 **Trim the tool list** when you don't need everything:
 
 ```bat
-set ARCGIS_SALAH_TOOLSETS=core,portal,webapp
+set ARCGIS_SALAH_TOOLSETS=core,portal
 ```
 
-| Setting | Tools | Tokens |
-| --- | --- | --- |
-| unset (everything) | 156 | ~27.0k |
-| `core` | 45 | ~6.1k |
-| `core,portal,webapp` | 57 | ~8.2k |
-| `core,geoai` | 62 | ~10.1k |
-| `core,egdb` | 80 | ~13.0k |
+| Setting | Tools | Tokens (chars/4) | Before the merge |
+| --- | --- | --- | --- |
+| unset (everything) | 72 | ~23.6k | 156 tools, ~22.8k (old portal had 9 tools) |
+| `core` | 14 | ~2.9k | 45 tools |
+| `core,portal` | 36 | ~11.3k | — |
+| `core,portal_base` | 24 | ~6.0k | — |
+| `core,geoai` | 19 | ~5.5k | 62 tools, ~8.4k |
+| `core,egdb` | 22 | ~6.9k | 80 tools, ~10.9k |
 
-Groups: `core` (always kept), `geoai`, `unet`, `schema`, `validate`,
-`authoring`, `egdb`, `live`, `portal`, `webapp`.
+Groups: `core` (always kept), `geoai`, `unet`, `schema`, `validate`, `authoring`, `egdb`, `live`, `portal` (=
+`portal_base` + `portal_data` + `portal_maps` + `portal_admin` + `portal_analysis`), `webapp`.
+`pro_server action=toolsets` shows what is active.
 
 ---
 
@@ -762,7 +797,7 @@ These came out of a real session (an agent driving the server from Claude Deskto
 
 | Symptom | Cause (measured) | What to do now |
 | --- | --- | --- |
-| A call ran past about a minute, came back as a timeout, and the calls after it hung | The MCP client stops waiting after roughly a minute, while the server ran every tool **on its event loop**, so one long call froze it | Tools no longer block the server: `pro_server_status` answers instantly and says what is running. For long work (creating a geodatabase, maintenance, replicas, many versions) use **`pro_run_background`** and poll **`pro_job_status`**. The first ArcPy call after the server starts waits for the ~25 s arcpy import (measured ~47 s with a PostgreSQL connection). |
+| A call ran past about a minute, came back as a timeout, and the calls after it hung | The MCP client stops waiting after roughly a minute, while the server ran every tool **on its event loop**, so one long call froze it | Tools no longer block the server: `pro_server action=status` answers instantly and says what is running. For long work (creating a geodatabase, maintenance, replicas, many versions, exports) use **`pro_batch background=true`** (or `pro_pipeline background=true`) and poll **`pro_server action=job`**. The first ArcPy call after the server starts waits for the ~25 s arcpy import (measured ~47 s with a PostgreSQL connection). |
 | `arcpy.ListVersions` → `ERROR 87395`, `ArcSDESQLExecute` → `ERROR 87413`, while the connection itself works | With **PostgreSQL**, ArcPy only works on the thread that imported it; the server imported it on a warm-up thread and ran tools on another (SQL Server was unaffected) | Every ArcPy tool now runs on one dedicated thread that also does the import - the Python counterpart of Pro's Main CIM Thread. |
 | `ArcGISProject("CURRENT")` fails | The server's Python runs outside ArcGIS Pro | `"CURRENT"` is now resolved to the project open in Pro through the live bridge (`pro_execute_code` and every tool that takes a project path). Edits saved to it from outside are overwritten when Pro saves - change the open session with `live_*` tools. |
 | `live_run_gp` → `NullReferenceException` for every tool | The add-in started the tool from its HTTP thread, which is neither Pro's UI thread nor the MCT | Add-in **0.1.6** builds the arguments with `QueuedTask.Run` and starts the tool from the UI thread, reporting each attempt in `steps`; bridge errors now include the failing stack frame (`where`). |
@@ -780,50 +815,54 @@ real one, so the tools now either handle them or say plainly what is missing.
 polygon.
 
 ```
-1. pro_un_create(feature_dataset, "WaterUtilityNetwork", service_territory)
+1. pro_un_author(action="create", feature_dataset=..., name="WaterUtilityNetwork",
+                 service_territory=...)
       -> ArcGIS auto-creates WaterDevice / WaterLine / WaterJunction /
          WaterAssembly / WaterSubnetLine and the Structure* classes.
 
-2. pro_un_add_domain_network(un, "Water", "HIERARCHICAL", "SOURCE")
+2. pro_un_author(action="domain_network", utility_network=un, name="Water",
+                 tier_definition="HIERARCHICAL", subnetwork_controller_type="SOURCE")
 
-3. pro_un_add_tier(un, "Water", "Distribution", rank=1, topology_type="MESH")
+3. pro_un_author(action="tier", utility_network=un, domain_network="Water",
+                 name="Distribution", rank=1, topology_type="MESH")
       -> A hierarchical network needs a tier GROUP and a SUBNETWORK FIELD; both
          are created for you. Two constraints ArcGIS enforces:
          * rank is per tier group, so with one tier per group rank is always 1;
          * every tier in the network must share the same topology type.
 
 4. Asset groups are SUBTYPES on the UN classes, and asset types are coded values
-   in ASSETTYPE. Create them with pro_set_subtypes / pro_create_domain.
+   in ASSETTYPE. Create them with pro_subtypes(action="set") /
+   pro_domain(action="create").
       -> enable_topology refuses until EVERY asset group of EVERY network class
          has an ASSETTYPE domain (ERROR 003077), and each domain must include
          the field's existing default value.
 
-5. pro_un_add_rule(un, "JUNCTION_EDGE_CONNECTIVITY",
-                   "WaterDevice", "Valve", "Gate",
-                   "WaterLine", "Main", "PVC")
+5. pro_un_author(action="rule", utility_network=un, rule_type="JUNCTION_EDGE_CONNECTIVITY",
+                 from_class="WaterDevice", from_assetgroup="Valve", from_assettype="Gate",
+                 to_class="WaterLine", to_assetgroup="Main", to_assettype="PVC")
       -> The topology will not enable with no rules at all (ERROR 002673).
 
-6. pro_un_topology(un, "enable")   then   pro_un_topology(un, "validate")
+6. pro_un_topology(un, action="enable")   then   pro_un_topology(un, action="validate")
 
 7. Load features INSIDE an edit session (arcpy.da.Editor) — UN classes reject
    edits outside one.
 
 8. Trace:
-     pro_un_add_trace_locations(un, out_fc)   # select your start features first
-     pro_un_trace(un, "CONNECTED", starting_points=out_fc,
+     pro_un_trace(un, action="add_locations", out_feature_class=out_fc)  # select start features first
+     pro_un_trace(un, trace_type="CONNECTED", starting_points=out_fc,
                   result_types=["AGGREGATED_GEOMETRY"], out_lines=...)
       -> A trace REJECTS a plain feature-class copy of your start points
          (ERROR 001911); it needs the purpose-built locations table.
 ```
 
-**Changing the schema?** Run `pro_un_topology(un, "disable")` first — ArcGIS
+**Changing the schema?** Run `pro_un_topology(un, action="disable")` first — ArcGIS
 refuses schema edits while the topology is enabled.
 
 ---
 
 ## How to run the GeoAI tools
 
-**Always start with `pro_geoai_check_environment`.** Deep-learning failures in
+**Always start with `pro_geoai_info` (what="environment").** Deep-learning failures in
 ArcGIS arrive late and opaque; this reports the Image Analyst licence, whether
 `arcpy.geoai` is present, the torch version and whether a CUDA GPU exists.
 
@@ -832,9 +871,9 @@ ArcGIS arrive late and opaque; this reports the Image Analyst licence, whether
 **1. Describe what you want, in words** — no model, no training, no class list:
 
 ```
-pro_geoai_detect_by_text(
+pro_geoai_text(
     in_raster = "imagery/scene.tif",
-    class_name = "swimming pool",       # or "solar panel", "flooded road"
+    prompt = "swimming pool",           # or "solar panel", "flooded road"
     box_threshold = 0.25,
     text_threshold = 0.25)
 ```
@@ -847,14 +886,14 @@ positives, lower them if you get nothing.
 > 156 s for one 512×512 tile. In **both** runs the returned boxes were zero-size at the
 > raster's top-left corner, and a scene with dozens of buildings produced a single
 > detection — so do not rely on it to *locate* things yet. The cause was not found (a GPU
-> and other tile sizes were not tried). On CPU, submit it through `pro_job_submit`.
+> and other tile sizes were not tried). On CPU, run it through `pro_batch(..., background=true)`.
 
 **2. "More like this"** — label ONE example, find the rest, still no training:
 
 ```
-pro_geoai_generate_embeddings(in_data, out_embeddings, model_definition)
-pro_geoai_find_similar(out_embeddings, query_features, out_features,
-                       threshold = 0.8)
+pro_geoai_infer(task="embeddings", in_data=..., out_embeddings=..., model_definition=...)
+pro_geoai_infer(task="similar", embedding_features=..., query_features=...,
+                out_features=..., threshold=0.8)
 ```
 
 A vision foundation model (DINOv3-class, SAM) turns the imagery into embedding
@@ -863,13 +902,13 @@ vectors; similarity search then replaces training entirely.
 **3. Train your own** — when you need a specific, repeatable classifier:
 
 ```
-pro_geoai_export_training_data(in_raster, out_folder, in_class_data,
-                               task = "object_detection")
-pro_geoai_train_model(out_folder, model_folder, "FASTERRCNN", max_epochs = 20)
-pro_geoai_detect_objects(in_raster, out_features, model_package)
+pro_geoai_train(action="export", in_raster=..., out_folder=..., in_class_data=...,
+                task="object_detection")
+pro_geoai_train(action="train", in_folder=..., out_folder=..., model_type="FASTERRCNN", max_epochs=20)
+pro_geoai_infer(task="detect", in_raster=..., out_features=..., model_definition=...)
 ```
 
-`pro_geoai_train_and_detect` chains all three. `pro_geoai_model_types` lists the
+`pro_geoai_train(action="train_and_detect")` chains all three. `pro_geoai_info(what="model_types")` lists the
 valid model types per task, and the training format is derived from `task` so it
 cannot mismatch what you later train — the classic "trained for two hours, then
 it failed" bug.
@@ -894,7 +933,7 @@ Write a matching `.tfw` world file so the result is georeferenced.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ARCGIS_PORTAL_URL` | `https://www.arcgis.com` | Portal target (AGOL or Enterprise) |
-| `ARCGIS_PROFILE` | — | Stored ArcGIS API for Python profile name |
+| `ARCGIS_PROFILE` | — | Stored ArcGIS API for Python profile (used when Pro is not signed in) |
 | `ARCGIS_JS_SDK_VERSION` | `5.0` | Maps SDK for JS version pinned in generated apps |
 | `ARCGIS_WEBAPP_OUT` | `webapp-build` | Default output folder for generated apps |
 | `ARCGIS_BRIDGE_PORT` | `2026` | Live bridge loopback port (no token) |
@@ -904,7 +943,15 @@ Write a matching `.tfw` world file so the result is georeferenced.
 | `ARCGIS_SALAH_CACHE_TTL` | `300` | Schema-cache TTL in seconds; `0` disables caching |
 | `ARCGIS_SALAH_NO_WARMUP` | `0` | Truthy skips the background arcpy import |
 | `ARCGIS_SALAH_NO_REEXEC` | `0` | Truthy skips the `arcgispro-py3` re-exec |
-| `ARCGIS_EGDB_AUTHORIZATION_FILE` | — | Your own keycodes file for `pro_egdb_create` / `pro_egdb_enable` |
+| `ARCGIS_EGDB_AUTHORIZATION_FILE` | — | Your own keycodes file for `pro_egdb_setup` (create / enable) |
+| `ARCGIS_SALAH_AUDIT_LOG` | `%LOCALAPPDATA%\arcgis_pro_salah_mcp\audit.jsonl` | Audit log of every portal write (`off` disables) |
+| `ARCGIS_SALAH_MAX_EDITS` | `5000` | Feature edits per `portal_layer_edit` call |
+| `ARCGIS_SALAH_MAX_USERS` | `200` | Rows per `portal_onboard` run |
+| `ARCGIS_SALAH_CREDIT_LIMIT` | `100` | Most credits one confirmed call may spend |
+| `ARCGIS_SALAH_ALLOW_PORTAL_WRITE_EXEC` | `true` | `false` disables `portal_python mode=write` |
+| `ARCGIS_SALAH_REST_HOSTS` | — | Extra hosts `portal_rest` may call |
+| `ARCGIS_SALAH_NO_PORTAL_WARMUP` | `0` | Truthy skips the background arcgis import and Pro sign-in |
+| `ARCGIS_SALAH_CACHE_DIR` | `%LOCALAPPDATA%\arcgis_pro_salah_mcp` | Where the arcgis API index is cached |
 
 ---
 
@@ -916,10 +963,14 @@ Core tests run without any ArcGIS install (CI runs this):
 PYTHONPATH=src python -m pytest tests/test_core.py
 ```
 
-53 tests covering the result envelope/guard behaviour, graceful ArcPy- and
+139 tests covering the result envelope/guard behaviour, graceful ArcPy- and
 bridge-absent degradation, the metadata inference, the schema cache, pipeline
-placeholder substitution, the `.pyt` and `.atbx` generators, toolset gating, and
-the argument validation that deliberately runs *before* any backend import.
+placeholder substitution, the `.pyt` and `.atbx` generators, toolset gating, the
+argument validation that deliberately runs *before* any backend import, `pro_batch`
+(references, parallel, background), and the portal layer against fake GIS objects:
+every CSV-onboarding rule, secrets/audit/credit rails, the `portal_python` read-mode
+guard, the REST host allowlist, layer edit rules and renderers, the knowledge index,
+resources and prompts. They also pass with `arcgis` and `arcpy` blocked from import.
 
 ### Regenerating the ribbon icons
 
@@ -938,15 +989,23 @@ python SalahAIBridge\Images\make_icons.py
 
 ```
 src/arcgis_pro_salah_mcp/
-  server.py          FastMCP server — registers all pro_/live_/portal_/webapp_ tools
-  bootstrap.py       self-healing arcgispro-py3 discovery
+  server.py          FastMCP server — every pro_/live_/portal_/webapp_ tool, the resources
+                     and the prompts; pro_batch; toolset gating; thread routing
+  bootstrap.py       self-healing arcgispro-py3 discovery, arcpy + arcgis warm-ups
+  arcpy_thread.py    the one thread that imports and runs ArcPy
+  stdio_guard.py     keeps library print() output off the MCP stdio channel
   config.py          env-driven config (portal URL, profile, JS SDK version, bridge port)
   _result.py         {"ok": ...} envelope + guard decorator
+  guides/            the playbooks (pro_server action=guide, and arcgis://guide/<topic>)
   pro/               Layer 1  — ArcPy ops, one-call context, cache, pipeline/jobs,
                      schema (domains/subtypes/rules), validate (topology),
-                     geoai, unet, toolbox (.pyt), modelbuilder (.atbx)
+                     geoai, unet, toolbox (.pyt), modelbuilder (.atbx), egdb
   live/              Layer 1b — client/ops/policy for the live .NET bridge
-  portal/ops.py      Layer 2  — ArcGIS API for Python
+  portal/            Layer 2  — ArcGIS API for Python: connections (Pro sign-in),
+                     content, access (users/groups/roles/CSV onboarding), layers,
+                     maps, apps, analysis, admin, knowledge (installed-API index),
+                     pyexec + rest (escape hatches), safety (confirm/audit/secrets),
+                     serialize, _imports (one lock for every arcgis import)
   webapp/            Layer 3  — generator.py (web app), dashboard.py (dashboard),
                      github.py (deploy), templates/ (index.html, app.js,
                      dashboard.html, dashboard.js)

@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "^2.12.0"
+  }
+}

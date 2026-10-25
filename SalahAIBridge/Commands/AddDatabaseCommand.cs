@@ -14,7 +14,7 @@ namespace SalahAIBridge.Commands
     /// <summary>
     /// <c>add_database</c> — params <c>{ path }</c> → <c>{ path, registered, already_registered, steps[] }</c>.
     /// Adds an existing <c>.sde</c> database connection file (or a file geodatabase folder) to the OPEN
-    /// project's Databases, so a connection made on disk by <c>pro_egdb_create_connection</c> shows up in
+    /// project's Databases, so a connection made on disk by <c>pro_egdb_connection action=create</c> shows up in
     /// the Catalog pane without the manual "Add Database" step.
     ///
     /// Same public route as <c>add_toolbox</c>: <c>ItemFactory.Create</c> + <c>Project.AddItem</c>, then

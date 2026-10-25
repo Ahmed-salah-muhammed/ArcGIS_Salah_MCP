@@ -1,58 +1,68 @@
 # ArcGIS Pro Salah MCP
 
-> MCP server (FastMCP, stdio) that lets an AI agent drive the Esri ArcGIS stack end to end: ArcPy geoprocessing on .aprx projects and geodatabases (`pro_*`), the OPEN ArcGIS Pro session through a .NET add-in (`live_*`), publishing to ArcGIS Online / Enterprise (`portal_*`), and static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards (`webapp_*`). 156 tools in 10 toolsets. Every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}` (usually with a `code`).
+> MCP server (FastMCP, stdio) that lets an AI agent drive the Esri ArcGIS stack end to end: ArcPy geoprocessing on .aprx projects and geodatabases (`pro_*`), the OPEN ArcGIS Pro session through a .NET add-in (`live_*`), ArcGIS Online / Enterprise through the ArcGIS API for Python (`portal_*`, signed in through ArcGIS Pro automatically), and static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards (`webapp_*`). 72 tools in 14 toolsets, 23 resources (playbooks, live project, my content) + 1 resource template (one portal item) and 11 prompts. Every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}` (usually with a `code`).
 
 Key facts for an agent using these tools:
 
+- Related operations share one tool with an `action` argument (e.g. `pro_layer action=add|remove|rename|...`,
+  `portal_item action=get|update|move|delete|export|...`). A wrong action returns `code: "bad_action"` listing the
+  valid ones; missing arguments are reported before any backend is touched.
+- Speed comes from fewer round trips: read with `pro_context` (one call), chain GP tools with `pro_pipeline`, and run
+  several tools of any layer in ONE call with `pro_batch` (`{{call1.data.<path>}}` passes a result to a later
+  call; `parallel=true` for independent calls). Anything long - geodatabases, maintenance, training, exports,
+  clones - takes `background=true` and is polled with `pro_server(action="job", job_id=...)`.
+  `pro_server(action="status")` answers at once: warm-ups, what the ArcPy thread is doing, portal connections, jobs.
 - The server runs under ArcGIS Pro's own Python (`arcgispro-py3`). ArcPy cannot attach to a running ArcGIS Pro, so
   `pro_*` tools work on files on disk. `"CURRENT"` as a project path is resolved to the project open in Pro through
-  the live bridge; saves made from the server to that `.aprx` are overwritten when Pro saves, so change the open
-  session with `live_*` tools. `live_*` needs ArcGIS Pro running with the SalahAIBridge add-in (0.1.6) listening on
-  127.0.0.1:2026; call `live_ping` first.
-- Start a session with `pro_context` (project, maps, layer schemas, counts and sample rows in one call).
-- Long work - creating a geodatabase, maintenance, replicas, many versions or users - can outlive the MCP client's
-  tool timeout (about a minute was observed). Run it with `pro_run_background` and poll `pro_job_status`.
-  `pro_server_status` answers at once and reports what the ArcPy thread is busy with. The first ArcPy call after
-  the server starts waits for the arcpy import (~25 s; ~47 s measured with a PostgreSQL connection).
-- Irreversible or disruptive operations refuse with `code: "confirm_required"` until they are called again with
-  `confirm=True`. Ask the user before passing it. `ARCGIS_BRIDGE_READONLY` makes every mutating `live_*` call
-  refuse with `code: "readonly"`.
+  the live bridge. `live_*` needs ArcGIS Pro running with the SalahAIBridge add-in (0.1.6) on 127.0.0.1:2026.
+- Portal tools sign in by themselves: the ArcGIS Pro sign-in first (`GIS("pro")`, Online or Enterprise, SSO
+  included), then a profile, then `username` + `password_env`. `portal_connect(action="whoami")` shows the user,
+  role and what it can do. Named connections (`connection="source"` / `"target"`) work across orgs.
+- When no curated tool fits: `portal_api` (search / doc of the INSTALLED arcgis library, deprecations flagged) ->
+  `portal_python mode=read` -> `portal_python mode=write confirm=true`. `portal_rest` for raw REST.
+- Irreversible, bulk, public, admin or credit-spending operations refuse with `code: "confirm_required"` and a
+  `preview` until called again with `confirm=True`. Ask the user first. Every portal write is audited.
 - Never put a password in a tool argument: tools take the NAME of an environment variable (`password_env`,
-  `dba_password_env`, ...). Enterprise geodatabase creation and enabling need the user's own ArcGIS Server /
-  Enterprise keycodes file: `authorization_file`, or `ARCGIS_EGDB_AUTHORIZATION_FILE` in the server environment.
-- Every tool schema is sent with every request (156 tools here). `ARCGIS_SALAH_TOOLSETS` keeps only some
-  groups, e.g. `core,egdb` or `core,portal,webapp` (`core` is always kept).
-- To turn a workflow into a reusable tool with parameters, use `pro_create_python_toolbox` (.pyt). `pro_create_model`
-  writes ModelBuilder models but only linear chains of feature-class tools are verified; it refuses the rest.
-- For deep-learning notebooks call `pro_dl_notebook` with only a goal first: it returns the questions to ask the
-  user (batch size, epochs, ...) and refuses to write the notebook until they are answered.
+  `dba_password_env`, `api_key_env`). Enterprise geodatabase creation needs the user's own keycodes
+  (`authorization_file` or `ARCGIS_EGDB_AUTHORIZATION_FILE`).
+- Playbooks: `pro_server(action="guide", topic=...)` (workflow, performance, portal-users, portal-layers,
+  gotchas, safety, egdb, ...; no topic lists them), also MCP resources `arcgis://guide/<topic>`. Attach an item
+  as context with the resource template `arcgis://portal/item/{item_id}`. Reusable workflows are MCP prompts
+  (plan_big_task, onboard_users_from_csv, org_audit, ...).
+- `ARCGIS_SALAH_TOOLSETS` keeps only some groups, e.g. `core,portal` (`portal` = every portal group) or `core,egdb`.
 
 ## Docs
 
 - [README](README.md): install, MCP client setup (Claude Desktop, Google Antigravity), the ribbon, every toolset with examples, troubleshooting
 - [llms-full.txt](llms-full.txt): this file plus workflows, verified pitfalls, configuration and the complete tool reference
-- [CLAUDE.md](CLAUDE.md): architecture and verified facts for contributors (threading, enterprise geodatabase findings, toolbox authoring)
+- [CLAUDE.md](CLAUDE.md): architecture and verified facts for contributors (threading, portal, enterprise geodatabase, toolbox authoring)
+- [Playbooks](src/arcgis_pro_salah_mcp/guides/): served by `pro_server action=guide` and as `arcgis://guide/<topic>`
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): wire contract of the live bridge (`live_*` <-> SalahAIBridge add-in)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): system architecture and component map
 
 ## Toolsets
 
-- `core` (45 tools): everyday ArcPy on .aprx/.gdb files, one-call project context, pipelines, background jobs (always kept)
-- `live` (10 tools): the OPEN ArcGIS Pro session through the SalahAIBridge add-in
-- `egdb` (35 tools): enterprise geodatabases on SQL Server / PostgreSQL / Oracle: create, connect, users and privileges, versioning, archiving, replication, administration
-- `geoai` (17 tools): deep learning, vision-language and foundation models, interview-first notebook generator
-- `unet` (14 tools): Utility Network
-- `schema` (12 tools): domains, subtypes, attribute rules
-- `validate` (7 tools): topology and geometry checks
-- `authoring` (4 tools): .pyt Python toolboxes and ModelBuilder models
-- `portal` (9 tools): ArcGIS Online / ArcGIS Enterprise portal via the ArcGIS API for Python
-- `webapp` (3 tools): static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards, GitHub deploy
+- `core` (14 tools): everyday ArcPy on .aprx/.gdb files, one-call project context, pipelines, batches, background jobs, server status (always kept)
+- `live` (6 tools): the OPEN ArcGIS Pro session through the SalahAIBridge add-in
+- `egdb` (8 tools): enterprise geodatabases on SQL Server / PostgreSQL / Oracle: create, connect, users and privileges, versioning, archiving, replication, administration
+- `geoai` (5 tools): deep learning, vision-language and foundation models, interview-first notebook generator
+- `unet` (5 tools): Utility Network
+- `schema` (4 tools): domains, subtypes, attribute rules
+- `validate` (3 tools): topology and geometry checks
+- `authoring` (3 tools): .pyt Python toolboxes and ModelBuilder models
+- `portal_base` (10 tools): ArcGIS Online / Enterprise via the ArcGIS API for Python: sign-in (through ArcGIS Pro first), search, items, folders, publish, share, clone, the installed-API knowledge tool, portal_python and portal_rest escape hatches
+- `portal_data` (3 tools): hosted feature layers: query, edit, calculate, append, truncate, schema, views, renderers
+- `portal_maps` (2 tools): web maps, web scenes, Survey123 / Dashboards / StoryMaps / dependency graph
+- `portal_admin` (5 tools): users, CSV onboarding, groups, roles and user types, org and server administration
+- `portal_analysis` (2 tools): geocoding and hosted spatial analysis / GP services, credits estimated first
+- `webapp` (2 tools): static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards, GitHub deploy
 
 ## Source
 
-- [server.py](src/arcgis_pro_salah_mcp/server.py): every MCP tool wrapper; its one-line docstring is the tool's spec
+- [server.py](src/arcgis_pro_salah_mcp/server.py): every MCP tool, resource and prompt; a tool's docstring is its spec
 - [pro/ops.py](src/arcgis_pro_salah_mcp/pro/ops.py): core ArcPy operations, `pro_execute_code`, `"CURRENT"` resolution
 - [pro/egdb.py](src/arcgis_pro_salah_mcp/pro/egdb.py): enterprise geodatabase toolset
+- [portal/](src/arcgis_pro_salah_mcp/portal/): ArcGIS API for Python layer (connections, content, access, layers, maps, apps, analysis, admin, knowledge, pyexec, rest, safety)
 - [arcpy_thread.py](src/arcgis_pro_salah_mcp/arcpy_thread.py): the single thread that owns ArcPy
 - [live/ops.py](src/arcgis_pro_salah_mcp/live/ops.py) and [live/policy.py](src/arcgis_pro_salah_mcp/live/policy.py): live bridge client and its safety rails
 - [SalahAIBridge/](SalahAIBridge/): the ArcGIS Pro .NET add-in (bridge server + Salah MCP ribbon)

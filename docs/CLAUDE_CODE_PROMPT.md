@@ -9,7 +9,7 @@
 > port-8770 / `live-bridge/` details below; they reflect the original plan.
 
 Paste the block below into Claude Code, opened in the repo
-`E:\iti-9month\MCP\ArcGIS Pro Salah MCP`. It implements the **live_*** tool
+the repository root. It implements the **live_*** tool
 group and scaffolds the .NET add-in. Build the add-in afterwards in
 **Visual Studio 2026 (18.3.2+)** — it targets **.NET 10** for ArcGIS Pro 3.7.
 
@@ -23,7 +23,7 @@ group and scaffolds the .NET add-in. Build the add-in afterwards in
 ---
 
 ```
-You are working in the repo at: E:\iti-9month\MCP\ArcGIS Pro Salah MCP
+You are working in the repository root of ArcGIS Pro Salah MCP
 
 This is "ArcGIS Pro Salah MCP" — a single FastMCP server that drives the whole
 ArcGIS stack. Three Python tool groups already exist and work: pro_* (headless

@@ -8,12 +8,14 @@ ArcGIS Pro .NET add-in that pairs with it. Each layer is a tool prefix backed by
 a different Esri technology:
 - `pro_*`    → ArcPy (headless geoprocessing on `.aprx` projects & `.gdb` files)
 - `live_*`   → loopback HTTP to the SalahAIBridge .NET add-in inside the OPEN Pro session
-- `portal_*` → ArcGIS API for Python (ArcGIS Online / Enterprise Portal)
+- `portal_*` → ArcGIS API for Python 2.4.3 (ArcGIS Online / Enterprise), signed in through ArcGIS Pro first
 - `webapp_*` → static ArcGIS Maps SDK for JS **5.0** generator (no backend):
-  `webapp_create` (web app), `webapp_create_dashboard` (dashboard),
-  `webapp_github_pipeline` (deploy to GitHub + Pages)
+  `webapp_create` (`kind=app|dashboard`), `webapp_github_pipeline` (deploy to GitHub + Pages)
 
-156 tools in total, grouped into toolsets (see **Performance** below).
+72 tools (was 156: related operations were merged into one tool with an `action` argument), 23 MCP
+resources + 1 template (playbooks `arcgis://guide/<topic>`, live project, my content, one item) and 11 MCP
+prompts, grouped into toolsets (see
+**Performance** below).
 
 Canonical agent workflow: **Pro (analyze) → Portal (publish) → WebApp (visualize)**.
 
@@ -54,9 +56,30 @@ dotnet build SalahAIBridge\SalahAIBridge.csproj -c Release
 
 ## Architecture
 Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
-- `server.py` — the only place `@mcp.tool()` wrappers live. Each is a thin
-  pass-through to an op; **its one-line docstring is the entire spec the model
-  sees**, so keep docstrings accurate and self-contained.
+- `server.py` — the only place `@mcp.tool()` wrappers, `@mcp.resource` and `@mcp.prompt` live. Each tool is a
+  thin pass-through to `@guard`-ed ops; **its docstring is the entire spec the model sees**, so keep docstrings
+  accurate and self-contained. Related operations share ONE tool with an `action` (or `kind`/`what`/`task`/
+  `operation`) argument, routed by `_dispatch(tool, action, {name: lambda: ...})` (unknown action ->
+  `code="bad_action"` listing the valid ones); `_need(arg=value, ...)` reports missing arguments before any
+  backend import. When adding an operation, prefer a new action on an existing tool over a new tool.
+- `pro_batch` (server.py): N tool calls of any layer in one round trip; `_ORIGINAL_FN` holds every tool's sync
+  function; `{{callN.<path>}}` / `{{prev...}}` resolve into earlier envelopes (a string that is exactly one
+  placeholder keeps the original type); arcpy tools go through `arcpy_thread.run`, others run in place or in a
+  thread pool (`parallel=true`); `background=true` runs the batch on `pipeline._JOB_POOL` (NOT the arcpy thread,
+  which would block arcpy while waiting on the network). Jobs are polled with `pro_server(action="job")`.
+- Resources: every `guides/*.md` file is registered as a static resource `arcgis://guide/<stem>` (a static
+  resource function must take no parameters, hence `_guide_reader`'s closure), plus `arcgis://guides`,
+  `arcgis://live/project`, `arcgis://portal/my-content` and the TEMPLATE `arcgis://portal/item/{item_id}`
+  (`content.item_context`). Resources are only CONTEXT worth attaching without a tool call; status, toolsets
+  and the module map were removed as resources because they duplicated `pro_server` / `portal_api`.
+  Network-touching resources are `async` + `asyncio.to_thread`: FastMCP awaits a coroutine resource but calls
+  a plain function on the event loop. Claude Desktop only shows a resource to the model when the USER
+  attaches it, so the playbooks are also served by `pro_server(action="guide", topic=...)`, and the prompts
+  point there, not at the URIs.
+  A test fails if a playbook names a tool that does not exist.
+- `stdio_guard.py` — `main()` replaces `sys.stdout` with a router whose `.buffer` is the real stdout (FastMCP's
+  stdio transport wraps that) and whose text writes go to a per-thread capture buffer or stderr, so a library
+  `print()` can never corrupt the JSON-RPC stream. `portal_python` captures through it.
 - `pro/ops.py`, `live/ops.py`, `portal/ops.py`, `webapp/{generator,dashboard,github}.py`
   — the implementations, every public function `@guard`-decorated.
 - `_result.py` — the `ok()` / `err()` envelope and the `guard` decorator. `guard`
@@ -94,7 +117,7 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   `arcpy.ia.DetectObjectsUsingText` returned zero-size boxes at the raster's top-left
   corner in two CPU runs (1024x1024/4 tiles, and a clean 512x512 single tile) and one
   detection for a scene with dozens of buildings; cause unknown (GPU / tile size /
-  `return_box_only` untried). `pro_geoai_detect_by_text` still exists, but do not
+  `return_box_only` untried). `pro_geoai_text` still exists, but do not
   present its output as locations.
   Change detection has TWO routes and plain "change" asks which: the ready-made Esri
   "Building Change Detection" DLPK (item `a779106c...`, 93 MB) via
@@ -145,9 +168,9 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   `portal_*`, `webapp_*`) -> `asyncio.to_thread`. Reason for the second half: FastMCP calls a sync tool
   directly on the event loop (`func_metadata.call_fn_with_arg_validation`), so one long call froze the server
   and the calls behind it hit the client's ~1 min timeout (reported from a real Claude Desktop session).
-  Verified over real stdio: `pro_server_status` answered in 0.0 s during a 15 s call. Module-level tool
-  functions are untouched; `_ORIGINAL_FN` keeps them for `pro_run_background` (any `pro_*` tool as a job,
-  polled with `pro_job_status`). The first arcpy call after start waits for the import (~47 s measured with a
+  Verified over real stdio: `pro_server action=status` answered in 0.0 s during a 15 s call. Module-level tool
+  functions are untouched; `_ORIGINAL_FN` keeps them for `pro_batch` (any tools, `background=true` = a job,
+  polled with `pro_server action=job`). The first arcpy call after start waits for the import (~47 s measured with a
   PostgreSQL connection).
 - `"CURRENT"`: `pro.ops._resolve_current` maps it to the open project's `.aprx` via the bridge's `ping`;
   `execute_code` rewrites `ArcGISProject("CURRENT")` and returns a note (saves from here are overwritten when Pro
@@ -159,8 +182,15 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   `import arcpy` would cost the very 25 s the warm-up exists to hide.
 
 State & backend notes:
-- `portal/ops.py` holds the active `GIS` connection in a **module-level `_GIS`**.
-  The agent calls `portal_connect` once; every other `portal_*` op requires it.
+- `portal/` — the ArcGIS API for Python layer (see **Portal - verified facts**). `connections.py` keeps NAMED
+  `GIS` connections; `get("default")` opens itself on first use (`source="auto"`: `GIS("pro")` -> profile ->
+  url+username+`password_env` -> `api_key_env` -> anonymous) and reconnects once on 498/499. `content.py`
+  (search, items, folders, publish, share, clone), `access.py` (users, groups, roles, CSV onboarding ported
+  from the user's `bulk_add_users.py`; its validation helpers are pure and unit-tested), `layers.py`, `maps.py`
+  (web-map JSON written directly, no `arcgis.map` import), `apps.py`, `analysis.py`, `admin.py`,
+  `knowledge.py` (index of the installed library), `pyexec.py` / `rest.py` (escape hatches), `safety.py`
+  (confirm, secrets, audit log, limits, credits), `serialize.py` (never return raw arcgis objects),
+  `_common.py` (ids over names: items, groups, folders), `_imports.py` (one lock for every arcgis import).
 - `webapp/` has **no ArcGIS dependency** — `generator.py` / `dashboard.py`
   string-replace `__JS_SDK_VERSION__` / `__APP_TITLE__` in their template
   (`templates/index.html` / `dashboard.html`), copy the JS verbatim (`app.js` /
@@ -201,7 +231,7 @@ raises**: transport failures come back as `err("bridge unreachable: …")`.
   probe for the DL and toolbox-registration tests.
 - **`add_database`** (`Commands/AddDatabaseCommand.cs`, add-in 0.1.5): same public route as add_toolbox for
   `.sde` files / `.gdb` folders, verified against `GetItems<GDBProjectItem>()` (`ArcGIS.Desktop.Catalog`).
-  `pro_egdb_create_connection` calls it after writing the file (MCP wrapper default). Compiles; it has not
+  `pro_egdb_connection action=create` calls it after writing the file (MCP wrapper default). Compiles; it has not
   been run in a live Pro yet (Pro was closed when it was built).
 - **`add_toolbox`** (`Commands/AddToolboxCommand.cs`, add-in 0.1.4): registers an `.atbx`/`.tbx`/`.pyt`
   in the open project's Toolboxes via the PUBLIC `ItemFactory.Create` + `Project.AddItem`, verified
@@ -255,8 +285,11 @@ anything here; several obvious ideas turned out to be wrong.
 | `import arcpy` | **25.1 s** (once per process) |
 | Opening an `.aprx` | 0.15 s cold, 0.01 s warm — **not** a bottleneck |
 | `Describe` / `ListFields` / `GetCount` | 73 / 172 / 189 ms |
-| one uncached `pro_describe_layer` | ~430 ms |
-| full tool schema, sent every request | 156 tools = **27.0k tokens** |
+| one uncached describe (`pro_query action=describe`) | ~430 ms |
+| `import arcgis` | 17 s after arcpy is loaded; 33-60 s cold |
+| `GIS("pro")` / a portal search | 1.0 s / 0.2-0.6 s |
+| arcgis API index build | 13 s once per arcgis version (256 s before the walker stopped importing `arcgis.learn` and skipped `arcgis.map.dataclasses`); disk cache 0.1 s |
+| full tool schema, sent every request | 72 tools = **~23.6k tokens** (chars/4; the old 156 tools were ~22.8k the same way) |
 
 The dominant cost is **round trips**, not ArcPy: every extra tool call is a full
 model inference. Four mechanisms address that:
@@ -272,14 +305,21 @@ model inference. Four mechanisms address that:
    cache then never hits (verified: 0 hits over two identical calls). Gdb entries
    use explicit invalidation plus a TTL (`ARCGIS_SALAH_CACHE_TTL`, default 300 s;
    0 disables). Plain files (shapefile, GeoTIFF) do use their own mtime.
-4. **`pro_pipeline` / `pro_job_submit`** — chain N geoprocessing steps in one
+4. **`pro_pipeline` / `pro_batch`** — chain N geoprocessing steps in one
    call (`{{prev}}`, `{{stepN}}` placeholders), or run them as a job on the arcpy thread
-   and poll with `pro_job_status` (`pro_run_background` does the same for any `pro_*` tool).
+   and poll with `pro_server action=job` (`pro_batch` runs any tools of any layer in one call, with
+   `parallel` and `background`).
 
-**Toolset gating.** `ARCGIS_SALAH_TOOLSETS` prunes tool groups at startup:
-`core,portal,webapp` takes 156 tools -> 57 and 27.0k -> 8.2k tokens (`core,egdb`: 80, ~13.0k). Groups:
-`core` (always kept), `geoai`, `unet`, `schema`, `validate`, `authoring`,
-`egdb`, `live`, `portal`, `webapp`. `pro_toolsets` reports what is active.
+**Toolset gating.** `ARCGIS_SALAH_TOOLSETS` prunes tool groups at startup: `core,egdb` = 22 tools ~6.9k,
+`core,portal` = 36 tools ~11.3k, `core,geoai` = 19 tools ~5.5k (chars/4). Groups: `core` (always kept),
+`geoai`, `unet`, `schema`, `validate`, `authoring`, `egdb`, `live`, `portal_base`, `portal_data`, `portal_maps`,
+`portal_admin`, `portal_analysis`, `webapp`; the alias `portal` (`TOOLSET_ALIASES`) turns on every portal group.
+`_toolset_of` returns the FIRST matching group, so the specific portal groups precede `portal_base` ("portal_").
+`pro_server action=toolsets` reports what is active.
+
+**Portal warm-up** (`bootstrap.start_portal_warmup`, only when a portal toolset is on): after the arcpy warm-up
+Future resolves, it imports the base arcgis modules under `_imports._LOCK`, tries `connections.connect(source="pro")`
+and loads the API index. `ARCGIS_SALAH_NO_PORTAL_WARMUP=1` disables it.
 
 **Where notebook creation time actually goes** (measured, `-X importtime` + timers):
 writing a 32-cell notebook is **~5 ms** (compile + save) — not the bottleneck. The costs
@@ -373,6 +413,52 @@ Harness scripts were run outside the repo; `tests/test_core.py` holds the backen
   `table_privileges` refuses versioned / archived / attachment datasets (several tables + views).
 - The expired evaluation keycodes still passed "Validated authorization file" for creating/enabling.
 
+## Portal - verified facts
+Discovered with `inspect` on the installed arcgis 2.4.3 (arcgis-mapping 5.0.0, Python 3.13, pandas 3) and tested
+live on the user's ArcGIS Online org (Publisher account, signed in through Pro) with throwaway `mcp_test_*`
+items in the user's own content, kept private and deleted (checked gone). Admin operations (create users/roles,
+org reports, Enterprise server admin) could NOT be run live - no admin rights - and are covered by mocked tests.
+
+- `GIS("pro")` works from a thread other than the one that imported arcpy (1.0 s, search 0.2 s). It imports
+  arcpy itself, so `connections._ensure_arcpy_on_its_thread` imports arcpy on THE arcpy thread first; otherwise
+  that worker would become the importing thread and PostgreSQL calls on the arcpy thread would fail.
+- **Import race:** two threads importing arcgis at once (the warm-up and a tool call) failed with "cannot import
+  name 'FeatureCollection' from partially initialized module 'arcgis.features.feature'" and "partially
+  initialized module 'arcgis' has no attribute 'auth'". Every arcgis import goes through `_imports.load` /
+  `_imports.ensure_base` (one RLock); `connections.get` calls `ensure_base` first, and every portal op starts
+  with `connections.get`. Do not add a bare `import arcgis...` in portal code.
+- Deprecated (decorator writes `.. deprecated::` into the docstring; removed in 3.0): `ContentManager.add`
+  (-> `Folder.add(ItemProperties, file=...)`, returns a Job: `.result()`), `Item.share`/`unshare` (->
+  `item.sharing.sharing_level` = `SharingLevel.PRIVATE/ORG/EVERYONE`, `item.sharing.groups.add/remove`),
+  `ContentManager.create_folder`/`rename_folder`/`delete_folder` (-> `content.folders.create/get().rename/delete`).
+  The knowledge index flags 66 deprecated symbols.
+- `create_view` has two bugs in 2.4.3, both hit live and both left a view item behind: `view_layers` is
+  annotated `list[int]` but each entry needs `.properties` (pass layer objects), and `visible_fields`/`query`
+  make it read `item.layers[0]` of the brand-new view before its layers exist ("list index out of range").
+  `layers.schema(create_view)` creates the view plain, waits up to 15 s for its layer, applies
+  `viewDefinitionQuery` + field visibility itself (object-id field kept visible), and on failure returns
+  `possibly_created` ids.
+- A `Group` hydrates lazily: `group.id` after `group.delete()` raises 400 - read ids before deleting.
+- Non-admins get 403 on `gis.users.license_types` (and may on `roles.all()`): `access._lookups` falls back to
+  `USER_TYPE_ALIASES` and returns a warning.
+- `update_definition` replaces `drawingInfo` as a whole: renderer and labels are merged into the current one
+  (`layers._merge_drawing`). `FeatureLayer.query` defaults to `return_all_records=True` - always page.
+- Deleting a hosted feature layer while a view exists fails ("has a related Service item"): delete views first.
+- Credits (Esri table): batch/stored geocoding 0.04 each; single unstored geocode, reverse, suggest free;
+  `features.analysis.*(estimate=True)` returns credits (measured 0.012 for a 12-point buffer). `safety.credit_gate`.
+- `knowledge.public_modules` walks packages with `pkgutil.iter_modules` WITHOUT importing (walk_packages imports
+  every package to recurse and so pulled in `arcgis.learn`: 256 s); `HEAVY` skips `arcgis.learn` (138 s) and
+  `arcgis.map.dataclasses` (pydantic web-map models, 37 s). Build 13 s, cached as
+  `%LOCALAPPDATA%\arcgis_pro_salah_mcp\arcgis_api_index_<version>.json`; `_BUILD_LOCK` stops a second build.
+- `portal_python` runs in-process on a worker thread (a subprocess would pay the 17-60 s arcgis import and a new
+  sign-in each call); a timed-out call keeps running. Read mode is an AST seatbelt (mutating calls, attribute
+  assignments like `sharing_level`/`privileges`, `os.remove`, `open(...,'w')`, `eval`...), not a sandbox.
+- `portal_rest` sends the session token only to the portal host, its helper-service hosts, `*.arcgis.com` on
+  ArcGIS Online, and `ARCGIS_SALAH_REST_HOSTS`.
+- Confirm rail: irreversible / bulk / public / admin / credit-spending writes return `confirm_required` with a
+  `preview`; low-risk additive writes (upload, add field, folder, private group, view, web map) run directly.
+  Every write calls `safety.audit` (JSON lines, scrubbed of registered secrets and token/password patterns).
+
 ## Conventions (follow when adding tools)
 1. **Result envelope.** Return `ok(data)` / `err(msg)` from `_result`; decorate
    the op with `@guard`.
@@ -380,8 +466,12 @@ Harness scripts were run outside the repo; `tests/test_core.py` holds the backen
    import inside `_arcpy()` / `_arcgis()` so the package imports (and
    `test_core.py` runs) on machines without ArcGIS.
 3. **Tool naming.** Prefix by layer: `pro_`, `live_`, `portal_`, `webapp_`.
-4. **Adding a tool:** write the `@guard` op in the relevant `ops.py`, then a thin
-   `@mcp.tool()` wrapper in `server.py` with a one-line docstring.
+4. **Adding a tool:** write the `@guard` op in the relevant module, then either a new action on an existing
+   `@mcp.tool()` (preferred: `_dispatch` + `_need`) or a thin new wrapper in `server.py` with a precise
+   docstring. A `pro_*` tool that needs no arcpy goes in `_NOT_ARCPY`. Re-run `scripts/build_llms.py`.
+5. **Portal writes:** `safety.confirm_required` for irreversible/bulk/public/admin/credit operations,
+   `safety.audit` for every write, secrets only via `safety.secret_from_env`, re-read after writing,
+   `serialize.*` for anything returned, arcgis imports via `_imports`.
 
 ## Key constraint
 ArcPy **cannot attach to a running ArcGIS Pro session** (Esri limitation), so the
@@ -405,18 +495,26 @@ listener (port 2026, no token) running inside Pro.
 | `ARCGIS_SALAH_NO_WARMUP` | `0` | Truthy skips the background arcpy import |
 | `ARCGIS_SALAH_NO_REEXEC` | `0` | Truthy skips the `arcgispro-py3` re-exec |
 | `ARCGIS_EGDB_AUTHORIZATION_FILE` | — | `pro/egdb.py`: the user's OWN keycodes file (never committed) |
+| `ARCGIS_SALAH_AUDIT_LOG` | `%LOCALAPPDATA%\arcgis_pro_salah_mcp\audit.jsonl` | `portal/safety.py` (`off` disables) |
+| `ARCGIS_SALAH_MAX_EDITS` / `_MAX_USERS` / `_CREDIT_LIMIT` | 5000 / 200 / 100 | `portal/safety.py` limits |
+| `ARCGIS_SALAH_ALLOW_PORTAL_WRITE_EXEC` | `true` | `portal/pyexec.py` write mode |
+| `ARCGIS_SALAH_REST_HOSTS` | — | `portal/rest.py` extra allowed hosts |
+| `ARCGIS_SALAH_NO_PORTAL_WARMUP` | `0` | `bootstrap.py`: skip the arcgis import + Pro sign-in warm-up |
+| `ARCGIS_SALAH_CACHE_DIR` | `%LOCALAPPDATA%\arcgis_pro_salah_mcp` | `portal/knowledge.py` index cache |
 
 The last two are *not* interchangeable despite naming the same thing — set both
 if you keep Pro somewhere non-standard.
 
 ## Tests
 `tests/test_core.py` must stay backend-free and green with **no ArcGIS installed**
-(117 tests). It covers the envelope/guard behavior, graceful ArcPy- and
+(139 tests; they also pass with `arcgis`/`arcpy` blocked from import). It covers the envelope/guard behavior, graceful ArcPy- and
 bridge-absent degradation, the `live/policy.py` rails, `pro/metadata.py` theme
 inference, both webapp generators, the cache (including the gdb-lock-file case
 and the TTL), pipeline placeholder substitution, the `.pyt` and `.atbx`
-generators, toolset gating, and the argument validation that deliberately runs
-*before* any backend import. Anything needing a real ArcGIS install belongs in a
+generators, toolset gating, the argument validation that deliberately runs
+*before* any backend import, `pro_batch`, and the portal layer against fake GIS objects (every onboarding
+rule, safety rails, the read-mode guard, REST allowlist, layer edits/renderers, knowledge index,
+resources and prompts). Live checks (real stdio, real org) live outside the repo. Anything needing a real ArcGIS install belongs in a
 separate `test_full_e2e.py` (planned), not here.
 
 **Validate before importing the backend.** Ops such as `schema.add_attribute_rule`
@@ -425,7 +523,7 @@ call then fails in microseconds instead of after a 25 s import — and the
 validation stays unit-testable in this file.
 
 ## Where the open work is
-- `pro_apply_categorized_symbology` / `pro_apply_graduated_symbology` build
+- `pro_symbology kind=categorized|graduated` build
   `lyr.symbology` renderers (UniqueValue / GraduatedColors) — implemented.
 - Web app + dashboard generators (Maps SDK 5.0), mixed Feature/Tile/Vector-Tile
   publishing, and GitHub deploy are implemented (ribbon **v0.1.2**).
