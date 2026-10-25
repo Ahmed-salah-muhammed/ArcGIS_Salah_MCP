@@ -36,7 +36,7 @@ Legend: ✅ done · 🟡 partial / stub · ⬜ planned
 - ✅ **ArcGIS Maps SDK for JavaScript 5.0** — single CDN module bundle with the
   Calcite Design System + `<arcgis-*>` map components; core classes via
   `$arcgis.import()` (no AMD `require`).
-- ✅ **Interactive dashboard generator** (`webapp_create_dashboard` + the
+- ✅ **Interactive dashboard generator** (`webapp_create kind=dashboard` + the
   **Create Dashboard** ribbon button): Calcite shell with live indicator cards
   (count + sums), a category breakdown, and a "features in view" list — all
   recomputed for the map's current extent on zoom/pan — plus a Light/Dark toggle.
@@ -55,8 +55,8 @@ Legend: ✅ done · 🟡 partial / stub · ⬜ planned
   (Start Server, Ping, Publish, Create Web App, Create Dashboard, Deploy Web App;
   add-in **v0.1.2**, Calcite/Octicons icons, hideable progress windows). Targets
   ArcGIS Pro 3.x / .NET 10.
-- ✅ Loopback HTTP exposed as `live_*` MCP tools (`live_ping`, `live_list_layers`,
-  `live_zoom_to`, `live_query`, `live_run_gp`, `live_add_layer`,
+- ✅ Loopback HTTP exposed as `live_*` MCP tools (`live_ping`, `live_map` (layers /
+  zoom / query / add_layer), `live_run_gp`,
   `live_export_layout`, `live_get_request`) — Python client + tools done; all
   handlers implemented, each on the MCT via `QueuedTask` (`run_gp` awaits
   `ExecuteToolAsync`). `get_request` lets the agent pick up Create Web App /

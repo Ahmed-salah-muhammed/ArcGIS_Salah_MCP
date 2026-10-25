@@ -3,10 +3,11 @@
 Two round-trip killers live here.
 
 ``pipeline()``
-    A buffer -> clip -> dissolve analysis used to be three tool calls, i.e.
-    three model inferences. Here it is one: the steps are declared up front and
-    executed server-side, with each step able to reference an earlier step's
-    output via a ``{{stepN}}`` / ``{{prev}}`` placeholder.
+    ANY chain of geoprocessing tools - anything reachable as ``arcpy.<toolbox>.<Tool>``
+    (analysis, management, conversion, sa, ia, ...) - runs in one call. Buffer -> clip ->
+    dissolve is just the classic example: it used to be three tool calls, i.e. three
+    model inferences. Here the steps are declared up front and executed server-side,
+    each able to reference an earlier step's output via ``{{stepN}}`` / ``{{prev}}``.
 
 ``submit()`` / ``job_status()``
     Some geoprocessing genuinely takes minutes. Rather than holding the MCP call
@@ -16,6 +17,7 @@ Two round-trip killers live here.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import re
 import threading
 import time
@@ -234,7 +236,7 @@ def submit(steps: list[dict], stop_on_error: bool = True, label: str | None = No
     from .. import arcpy_thread
 
     arcpy_thread.submit(_worker, job_id, steps, stop_on_error, label=f"job {job_id}")
-    return ok({"job_id": job_id, "state": "queued", "steps": len(steps)})
+    return ok({"job_id": job_id, "state": "queued", "steps": len(steps), "next": _next_hint(job_id)})
 
 
 def _new_job(label: str, **extra: Any) -> str:
@@ -270,8 +272,41 @@ def submit_call(label: str, fn: Any, arguments: dict | None = None) -> dict:
             _set(job_id, state="failed", error=f"{type(exc).__name__}: {exc}", finished_at=time.time())
 
     arcpy_thread.submit(work, label=f"background {label}")
-    return ok({"job_id": job_id, "state": "queued", "tool": label,
-               "next": f"pro_job_status(job_id='{job_id}') until state is finished or failed"})
+    return ok({"job_id": job_id, "state": "queued", "tool": label, "next": _next_hint(job_id)})
+
+
+# Jobs that are not themselves arcpy work (pro_batch: it dispatches arcpy calls TO the arcpy thread and
+# portal/live calls elsewhere) run here, so they never hold the arcpy thread while waiting on the network.
+_JOB_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="job")
+
+
+def _next_hint(job_id: str) -> str:
+    return f"pro_server(action='job', job_id='{job_id}') until state is finished or failed"
+
+
+def submit_job(label: str, fn: Callable[[Callable[[str], None]], Any], **extra: Any) -> dict:
+    """Run ``fn(progress)`` as a background job on the job pool; its return value is kept as the result."""
+    job_id = _new_job(label, **extra)
+
+    def work() -> None:
+        _set(job_id, state="running", started_at=time.time())
+        try:
+            result = fn(lambda msg: _set(job_id, progress=msg))
+            failed = isinstance(result, dict) and result.get("ok") is False
+            _set(job_id, state="failed" if failed else "finished", result=result, finished_at=time.time())
+        except Exception as exc:  # noqa: BLE001 - a job must never die silently
+            _set(job_id, state="failed", error=f"{type(exc).__name__}: {exc}", finished_at=time.time())
+
+    _JOB_POOL.submit(work)
+    return ok({"job_id": job_id, "state": "queued", "label": label, "next": _next_hint(job_id)})
+
+
+def jobs_summary() -> dict:
+    with _JOBS_LOCK:
+        counts: dict[str, int] = {}
+        for j in _JOBS.values():
+            counts[j["state"]] = counts.get(j["state"], 0) + 1
+    return counts
 
 
 @guard

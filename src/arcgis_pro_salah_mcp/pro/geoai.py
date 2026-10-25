@@ -147,8 +147,9 @@ def check_environment() -> dict:
         report["torch"] = f"unavailable: {exc} (install deep-learning-essentials)"
 
     try:
-        import arcgis  # type: ignore
+        from ..portal import _imports
 
+        arcgis = _imports.load("arcgis")  # shared lock: the portal warm-up may be importing it right now
         report["arcgis_api"] = getattr(arcgis, "__version__", "unknown")
     except Exception:  # noqa: BLE001
         report["arcgis_api"] = "not installed"

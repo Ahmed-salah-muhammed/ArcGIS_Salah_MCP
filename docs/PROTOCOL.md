@@ -73,7 +73,7 @@ thread awaits that task, then serializes the result.
   `Project.GetItems<GeoprocessingProjectItem>()`; attempts are returned in `steps`.
 - **`add_database`** (add-in 0.1.5+) — adds an existing `.sde` connection file (or a `.gdb`) to the open
   project's Databases with the same public `ItemFactory.Create` + `Project.AddItem` route, verified against
-  `Project.GetItems<GDBProjectItem>()`. `pro_egdb_create_connection` calls it after writing the file.
+  `Project.GetItems<GDBProjectItem>()`. `pro_egdb_connection action=create` calls it after writing the file.
 - **`get_request`** — returns the request the user parked from the ribbon (Create
   Web App prompt / Publish); `kind` is `web_app` or `publish`, `text` is what they
   typed. Pass `{"clear": true}` to consume it. Lets the agent pick up the user's intent.

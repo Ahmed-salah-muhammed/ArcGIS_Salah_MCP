@@ -151,6 +151,59 @@ def start_warmup():
     return _WARMUP_THREAD
 
 
+# --- Portal warm-up --------------------------------------------------------
+# ``import arcgis`` measured 60 s cold on its own and 17 s once arcpy is loaded; GIS("pro") then signs in
+# in ~1 s. Doing both in the background (AFTER the arcpy import, so the two imports do not fight for the
+# CPU and arcpy lands on its own thread first) makes the first portal_* call answer at once.
+
+_PORTAL_WARMUP: dict[str, object] = {"state": "idle", "seconds": None, "error": None, "signed_in": None}
+
+
+def portal_warmup_status() -> dict:
+    with _WARMUP_LOCK:
+        return dict(_PORTAL_WARMUP)
+
+
+def start_portal_warmup(after=None) -> None:
+    """Import arcgis, sign in through ArcGIS Pro if it is signed in, load the API index. Never raises."""
+    if os.environ.get("ARCGIS_SALAH_NO_PORTAL_WARMUP", "").strip().lower() in {"1", "true", "yes", "on"}:
+        with _WARMUP_LOCK:
+            _PORTAL_WARMUP["state"] = "skipped"
+        return
+
+    def work() -> None:
+        started = time.perf_counter()
+        try:
+            if after is not None:
+                try:
+                    after.result(timeout=900)
+                except Exception:  # noqa: BLE001 - arcpy missing is fine for the portal
+                    pass
+            with _WARMUP_LOCK:
+                _PORTAL_WARMUP["state"] = "importing"
+            from .portal import _imports, connections, knowledge
+
+            _imports.ensure_base()  # under the shared import lock: a tool call arriving now waits, not races
+            with _WARMUP_LOCK:
+                _PORTAL_WARMUP["state"] = "signing_in"
+
+            reply = connections.connect(source="pro")
+            with _WARMUP_LOCK:
+                _PORTAL_WARMUP["signed_in"] = (
+                    {"user": reply["data"].get("username"), "url": reply["data"].get("url")} if reply.get("ok")
+                    else False)
+                _PORTAL_WARMUP["state"] = "indexing"
+            knowledge.index()
+            with _WARMUP_LOCK:
+                _PORTAL_WARMUP.update(state="ready", seconds=round(time.perf_counter() - started, 1))
+        except Exception as exc:  # noqa: BLE001
+            with _WARMUP_LOCK:
+                _PORTAL_WARMUP.update(state="failed", error=str(exc)[:300],
+                                      seconds=round(time.perf_counter() - started, 1))
+
+    threading.Thread(target=work, name="portal-warmup", daemon=True).start()
+
+
 # --- Startup orchestration -------------------------------------------------
 
 def ensure_arcpy() -> None:
@@ -174,12 +227,13 @@ def ensure_arcpy() -> None:
     os.execv(target, [target, "-m", "arcgis_pro_salah_mcp.server", *sys.argv[1:]])
 
 
-def prepare() -> None:
+def prepare():
     """Called once from ``server.main()`` before the MCP loop starts.
 
     Re-exec under ``arcgispro-py3`` if needed, then kick off the arcpy warm-up.
     Both steps are non-blocking (the re-exec either happens immediately or not
     at all), so the MCP client's ``initialize`` handshake is never delayed.
+    Returns the warm-up Future (or None) so the portal warm-up can queue behind it.
     """
     if os.environ.get("ARCGIS_SALAH_NO_REEXEC", "").strip().lower() not in {
         "1",
@@ -197,5 +251,5 @@ def prepare() -> None:
     }:
         with _WARMUP_LOCK:
             _WARMUP["state"] = "skipped"
-        return
-    start_warmup()
+        return None
+    return start_warmup()

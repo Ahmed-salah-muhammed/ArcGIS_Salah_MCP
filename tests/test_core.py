@@ -2221,37 +2221,98 @@ def test_every_tool_is_async_and_arcpy_tools_run_on_the_arcpy_thread(monkeypatch
 
     tools = server.mcp._tool_manager._tools
     assert all(t.is_async for t in tools.values())          # nothing blocks the event loop any more
-    assert tools["pro_buffer"].parameters["properties"]      # schemas untouched by the re-routing
+    assert tools["pro_analysis"].parameters["properties"]    # schemas untouched by the re-routing
 
-    monkeypatch.setattr(server.pro, "ping", lambda: {"ok": True, "data": {"thread": threading.get_ident()}})
-    res = asyncio.run(server.mcp.call_tool("pro_ping", {}))
+    monkeypatch.setattr(server.pro, "layer_summary", lambda d: {"ok": True, "data": {"thread": threading.get_ident()}})
+    res = asyncio.run(server.mcp.call_tool("pro_query", {"action": "summary", "dataset": "x"}))
     blocks = res[0] if isinstance(res, tuple) else res
     payload = json.loads(blocks[0].text)
     assert payload["data"]["thread"] == arcpy_thread._STATE["thread_id"]
+    # portal / live / batch tools never take the arcpy thread
+    assert not server._runs_on_arcpy("portal_search") and not server._runs_on_arcpy("pro_batch")
+    assert server._runs_on_arcpy("pro_egdb_versions") and not server._runs_on_arcpy("pro_server")
 
 
-def test_run_background_returns_at_once_and_keeps_the_result(monkeypatch):
+def _wait_job(server, job_id):
+    import time
+
+    for _ in range(100):
+        status = server.pro_server("job", job_id)["data"]
+        if status["state"] in ("finished", "failed"):
+            return status
+        time.sleep(0.05)
+    raise AssertionError("job did not finish")
+
+
+def test_batch_background_returns_at_once_and_keeps_the_result(monkeypatch):
     import time
 
     from arcgis_pro_salah_mcp import server
 
-    def slow():
+    def slow(**kwargs):
         time.sleep(0.3)
-        return {"ok": True, "data": "done"}
+        return {"ok": True, "data": {"seen": kwargs}}
 
-    monkeypatch.setitem(server._ORIGINAL_FN, "pro_ping", slow)
+    monkeypatch.setitem(server._ORIGINAL_FN, "pro_query", slow)
     started = time.perf_counter()
-    sub = server.pro_run_background("pro_ping")
+    sub = server.pro_batch([{"tool": "pro_query", "arguments": {"dataset": "a"}}], background=True)
     assert sub["ok"] is True and time.perf_counter() - started < 0.2
-    job = sub["data"]["job_id"]
-    for _ in range(50):
-        status = server.pro_job_status(job)["data"]
-        if status["state"] in ("finished", "failed"):
-            break
-        time.sleep(0.05)
-    assert status["state"] == "finished" and status["result"] == {"ok": True, "data": "done"}
-    assert server.pro_run_background("live_ping")["code"] == "unknown_tool"
-    assert server.pro_run_background("pro_no_such_tool")["code"] == "unknown_tool"
+    status = _wait_job(server, sub["data"]["job_id"])
+    assert status["state"] == "finished"
+    assert status["result"]["data"]["calls"][0]["result"]["data"]["seen"] == {"dataset": "a"}
+    assert server.pro_batch([{"tool": "pro_no_such_tool"}])["code"] == "unknown_tool"
+    assert server.pro_batch([{"tool": "pro_batch", "arguments": {}}])["code"] == "unknown_tool"
+    assert server.pro_batch([])["code"] == "bad_argument"
+
+
+def test_batch_passes_results_between_calls_and_stops_on_error(monkeypatch):
+    from arcgis_pro_salah_mcp import server
+
+    seen = {}
+    monkeypatch.setitem(server._ORIGINAL_FN, "portal_search",
+                        lambda **k: {"ok": True, "data": {"items": [{"id": "abc", "n": 3}], "ids": ["x", "y"]}})
+
+    def item(**k):
+        seen.update(k)
+        return {"ok": True, "data": k}
+
+    monkeypatch.setitem(server._ORIGINAL_FN, "portal_item", item)
+    out = server.pro_batch([
+        {"tool": "portal_search", "arguments": {"query": "q"}},
+        {"tool": "portal_item", "arguments": {"action": "get", "item_id": "{{call1.data.items.0.id}}",
+                                             "properties": {"ids": "{{call1.data.ids}}", "note": "n={{prev.data.items.0.n}}"}}},
+    ])
+    assert out["ok"] is True and out["data"]["succeeded"] == 2
+    assert seen["item_id"] == "abc"
+    assert seen["properties"] == {"ids": ["x", "y"], "note": "n=3"}   # whole placeholder keeps the list type
+
+    bad = server.pro_batch([
+        {"tool": "portal_search", "arguments": {}},
+        {"tool": "portal_item", "arguments": {"item_id": "{{call1.data.missing}}"}},
+        {"tool": "portal_search", "arguments": {}},
+    ])
+    assert bad["ok"] is False and bad["code"] == "batch_partial"
+    calls = bad["data"]["calls"]
+    assert calls[1]["result"]["code"] == "bad_reference" and calls[2].get("skipped") is True
+    assert server.pro_batch([{"tool": "portal_search", "arguments": {"q": "{{call1.data}}"}}],
+                            parallel=True)["code"] == "bad_argument"
+
+
+def test_batch_parallel_runs_concurrently(monkeypatch):
+    import time
+
+    from arcgis_pro_salah_mcp import server
+
+    def slow(**k):
+        time.sleep(0.3)
+        return {"ok": True, "data": k}
+
+    monkeypatch.setitem(server._ORIGINAL_FN, "portal_search", slow)
+    started = time.perf_counter()
+    out = server.pro_batch([{"tool": "portal_search", "arguments": {"query": str(i)}} for i in range(4)],
+                           parallel=True)
+    assert out["ok"] is True and time.perf_counter() - started < 0.9
+    assert [c["result"]["data"]["query"] for c in out["data"]["calls"]] == ["0", "1", "2", "3"]
 
 
 def test_current_means_the_project_open_in_pro(monkeypatch):
@@ -2275,3 +2336,627 @@ def test_current_means_the_project_open_in_pro(monkeypatch):
     monkeypatch.setattr(client, "post", lambda *a, **k: {"ok": False, "error": "bridge unreachable"})
     dead = ops.execute_code('aprx = arcpy.mp.ArcGISProject("CURRENT")')
     assert dead["ok"] is False and "outside Pro" in dead["error"]
+
+
+# =====================================================================
+# Portal (ArcGIS API for Python) - all backend-free: fake GIS objects, no arcgis import.
+# =====================================================================
+
+class _FakeUser(dict):
+    """Behaves like arcgis.gis.User (a dict with attribute access and the write methods we call)."""
+
+    def __init__(self, calls, **props):
+        super().__init__(props)
+        self._calls = calls
+        self._groups = []
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    @property
+    def groups(self):
+        return list(self._groups)
+
+    def update_license_type(self, ut):
+        self._calls.append(("type", self["username"], ut))
+        self["userLicenseTypeId"] = ut
+        return True
+
+    def update_role(self, role):
+        self._calls.append(("role", self["username"], role))
+        if role.startswith("org_"):
+            self["role"], self["roleId"] = role, None
+        else:
+            self["role"], self["roleId"] = "org_user", role
+        return True
+
+
+_FAKE_STATE: dict = {}
+
+
+class _FakeGroup(dict):
+    def __init__(self, gid, title, owner="me"):
+        super().__init__(id=gid, title=title, owner=owner, capabilities=[])
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def add_users(self, usernames):
+        for u in usernames:
+            _FAKE_STATE["users"][u]._groups.append(self)
+        return {"notAdded": []}
+
+
+class _FakeRole:
+    def __init__(self, role_id, name, privileges):
+        self.role_id, self.name, self.privileges, self.description = role_id, name, privileges, name
+
+
+class _FakeGIS:
+    def __init__(self, is_portal=False, admin=True, license_403=False):
+        calls: list = []
+        self.calls = calls
+        self.url = "https://www.arcgis.com"
+        self.properties = {"isPortal": is_portal, "name": "Test Org", "id": "org1"}
+        users = {"adminuser": _FakeUser(calls, username="adminuser", role="org_admin", roleId=None,
+                                        privileges=["portal:admin:viewUsers"] if admin else [])}
+        _FAKE_STATE["users"] = users
+        groups = [_FakeGroup("a" * 32, "Field Editors"), _FakeGroup("b" * 32, "QA Team"),
+                  _FakeGroup("c" * 32, "Dup"), _FakeGroup("d" * 32, "Dup")]
+        roles = [_FakeRole("rGIS000000000000", "Existing Custom", ["portal:user:joinGroup"])]
+
+        class Roles:
+            def all(self):
+                return list(roles)
+
+            def create(self, name, description, privileges):
+                calls.append(("create_role", name))
+                r = _FakeRole("rNEW000000000000", name, [p for p in privileges if not p.startswith("bad:")])
+                roles.append(r)
+                return r
+
+        class Users:
+            roles = Roles()
+
+            @property
+            def me(self):
+                return users["adminuser"]
+
+            @property
+            def license_types(self):
+                if license_403:
+                    raise RuntimeError("You do not have permissions to access this resource (Error Code: 403)")
+                return [{"id": "creatorUT", "name": "Creator"}, {"id": "viewerUT", "name": "Viewer"},
+                        {"id": "GISProfessionalStdUT", "name": "Professional"}]
+
+            def get(self, username, outside_org=True):
+                return users.get(username)
+
+            def search(self, query=None, max_users=100, role=None, user_type=None):
+                return list(users.values())
+
+            def create(self, username, password, firstname, lastname, email, role=None, user_type=None,
+                       description=None, credits=-1, groups=None, **kw):
+                calls.append(("create", username, role, user_type, password))
+                builtin = (role or "org_user").startswith("org_")
+                users[username] = _FakeUser(calls, username=username,
+                                            role=role if builtin and role != "org_admin" else "org_user",
+                                            roleId=None if builtin else role, userLicenseTypeId=user_type,
+                                            firstName=firstname, lastName=lastname, email=email)
+                return None  # Enterprise sometimes returns None on success - the code must re-read
+
+        class Groups:
+            def get(self, gid):
+                return next((g for g in groups if g.id == gid), None)
+
+            def search(self, query, max_groups=1000, **kw):
+                title = query.split('"')[1] if '"' in query else query
+                return [g for g in groups if g.title.lower() == title.lower()]
+
+        self.users = Users()
+        self.groups = Groups()
+
+
+def _write_csv(path, rows,
+               header="username,password,firstname,lastname,email,user_type,role,groups,credits,description"):
+    path.write_text(header + "\n" + "\n".join(rows) + "\n", encoding="utf-8-sig")
+    return path
+
+
+def test_portal_onboard_validation_rules_block_the_whole_run(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.portal import access, connections
+
+    gis = _FakeGIS(is_portal=True)            # Enterprise: passwords are required
+    monkeypatch.setattr(connections, "get", lambda name="default": gis)
+    csv_path = _write_csv(tmp_path / "users.csv", [
+        "gis.sara01,Change.Me.2026a,\u0633\u0627\u0631\u0629,Doe,sara@example.com,Creator,GIS Specialist,"
+        "Field Editors;QA Team,,ok",
+        "short,Change.Me.2026b,Mona,Saleh,mona@example.com,Professional,Viewer,,,",           # username too short
+        "gis.rsmith03,,Robin,Smith,not-an-email,Wizard,Nope,Dup;Missing,abc,",                   # many problems
+        "gis.sara01,Change.Me.2026c,Dup,Row,dup@example.com,Viewer,Viewer,,,",               # duplicate
+    ])
+    out = access.onboard("validate", str(csv_path))
+    assert out["ok"] is False and out["code"] == "invalid_rows"
+    rows = {r["line"]: r for r in out["rows"]}
+    assert rows[2]["errors"] is None and rows[2]["role"] == "GIS Specialist"      # preset role counts as valid
+    assert any("at least 6" in e for e in rows[3]["errors"])
+    errs = " | ".join(rows[4]["errors"])
+    for needle in ("password is required on ArcGIS Enterprise", "email looks invalid", "unknown user type",
+                   "unknown role", "ambiguous", "'Missing' not found", "not a number"):
+        assert needle in errs, needle
+    assert any("duplicate username" in e for e in rows[5]["errors"])
+    report = Path(out["report"]).read_text(encoding="utf-8-sig")
+    assert "Change.Me" not in report and "gis.sara01" in report
+    assert not any(c[0] == "create" for c in gis.calls)                           # nothing was created
+    plans = access.load_csv(csv_path)
+    assert plans[0].row["firstname"] == "\u0633\u0627\u0631\u0629"                 # Arabic survives utf-8-sig
+
+
+def test_portal_onboard_run_needs_confirm_then_creates_type_before_role(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.portal import access, connections
+
+    gis = _FakeGIS(is_portal=False)
+    monkeypatch.setattr(connections, "get", lambda name="default": gis)
+    csv_path = _write_csv(tmp_path / "u.csv", [
+        "gis.jdoe01,,Jane,Doe,jane@example.com,Creator,GIS Specialist,Field Editors,,",
+        "gis.boss001,Change.Me.2026x,Boss,One,boss@example.com,creatorUT,Administrator,,,",
+        "adminuser,,Ad,Min,a@example.com,Creator,Administrator,,,",                     # already exists
+    ])
+    pending = access.onboard("run", str(csv_path))
+    assert pending["code"] == "confirm_required"
+    assert pending["preview"]["summary"]["grants_admin_to"] == ["gis.boss001", "adminuser"]
+    assert pending["preview"]["summary"]["existing"] == ["adminuser"]
+    assert not any(c[0] == "create" for c in gis.calls)
+
+    done = access.onboard("run", str(csv_path), confirm=True)
+    assert done["ok"] is True, done
+    assert done["data"]["counts"] == {"created": 2, "skipped": 1}
+    creates = [c for c in gis.calls if c[0] == "create"]
+    boss = next(c for c in creates if c[1] == "gis.boss001")
+    assert boss[2] == "org_user"                                   # never created directly as admin ...
+    assert ("role", "gis.boss001", "org_admin") in gis.calls        # ... promoted afterwards
+    assert ("create_role", "GIS Specialist") in gis.calls           # preset created because the CSV uses it
+    jane_create = next(c for c in creates if c[1] == "gis.jdoe01")
+    assert jane_create[2] == "rNEW000000000000"                    # the new role's id, not its name
+    assert jane_create[4] is None                                  # Online + blank password = email invitation
+    assert [g.title for g in _FAKE_STATE["users"]["gis.jdoe01"].groups] == ["Field Editors"]
+    report = Path(done["data"]["report"]).read_text(encoding="utf-8-sig")
+    assert "Change.Me" not in report
+
+
+def test_portal_user_types_fall_back_to_aliases_on_403():
+    from arcgis_pro_salah_mcp.portal import access
+
+    assert access.user_type_lookup([])["professional"] == "GISProfessionalStdUT"
+    lookup = access.user_type_lookup([{"id": "creatorUT", "name": "Creator"}])
+    assert lookup["creator"] == "creatorUT" and "professional" not in lookup      # only types the org has
+    ut, _, _, warnings = access._lookups(_FakeGIS(license_403=True))
+    assert ut["viewer"] == "viewerUT" and any("403" in w for w in warnings)
+    roles, names = access.role_lookup([("rX", "Field Crew")])
+    assert roles["field crew"] == "rX" and roles["viewer"] == "iAAAAAAAAAAAAAAA"
+    assert names["org_admin"] == "Administrator"
+    assert access.normalize_header(" User Type ") == "user_type"
+    assert access.role_matches({"role": "org_user", "roleId": "iAAAAAAAAAAAAAAA"}, "iAAAAAAAAAAAAAAA")
+    assert not access.role_matches({"role": "org_user", "roleId": "iAAAAAAAAAAAAAAA"}, "org_user")
+
+
+def test_portal_users_create_requires_confirm_and_never_takes_a_raw_password(monkeypatch):
+    from arcgis_pro_salah_mcp.portal import access, connections
+
+    gis = _FakeGIS()
+    monkeypatch.setattr(connections, "get", lambda name="default": gis)
+    kwargs = dict(firstname="N", lastname="U", email="n@example.com", user_type="Viewer", role="Viewer")
+    assert access.users("create", "gis.new001", password_env="Secret Value!", **kwargs)["code"] == \
+        "bad_secret_reference"
+    monkeypatch.setenv("MCP_TEST_PWD", "S3cret.Value.123")
+    pending = access.users("create", "gis.new001", password_env="MCP_TEST_PWD", **kwargs)
+    assert pending["code"] == "confirm_required" and "S3cret" not in json.dumps(pending)
+    done = access.users("create", "gis.new001", password_env="MCP_TEST_PWD", confirm=True, **kwargs)
+    assert done["ok"] is True and done["data"]["verified"] is True
+    assert done["data"]["user"]["roleId"] == "iAAAAAAAAAAAAAAA"
+    assert access.users("create", "gis.new001", password_env="MCP_TEST_PWD", confirm=True, **kwargs)["code"] == \
+        "exists"
+
+
+def test_portal_safety_secrets_scrub_audit_and_credits(tmp_path, monkeypatch):
+    from arcgis_pro_salah_mcp.portal import safety
+
+    monkeypatch.setenv("ARCGIS_SALAH_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("MCP_TEST_SECRET", "very-secret-value")
+    value, problem = safety.secret_from_env("MCP_TEST_SECRET")
+    assert value == "very-secret-value" and problem is None
+    assert safety.secret_from_env("NOT_SET_ANYWHERE_123")[1]["code"] == "secret_missing"
+    clean = safety.scrub("url?token=abc.def&x=1 password=hunter22 Authorization: Bearer xyz very-secret-value")
+    for leaked in ("abc.def", "hunter22", "xyz", "very-secret-value"):
+        assert leaked not in clean
+    assert safety.scrub({"token": "t", "nested": ["very-secret-value"]}) == {"token": "***", "nested": ["***"]}
+    safety.audit("portal_x", "delete", target="id1", ok=True, details={"code": "pwd=very-secret-value"})
+    line = (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+    assert "very-secret-value" not in line and '"action": "delete"' in line
+    assert safety.read_audit(5)[-1]["target"] == "id1"
+    assert safety.credit_gate(5, False, "x", True)["code"] == "confirm_required"
+    assert safety.credit_gate(5, True, "x", True) is None
+    assert safety.credit_gate(5, False, "x", False) is None                     # Enterprise: no credits
+    monkeypatch.setenv("ARCGIS_SALAH_CREDIT_LIMIT", "2")
+    assert safety.credit_gate(5, True, "x", True)["code"] == "credit_limit"
+    monkeypatch.setenv("ARCGIS_SALAH_AUDIT_LOG", "off")
+    assert safety.audit_path() is None
+
+
+def test_portal_python_read_mode_guard():
+    from arcgis_pro_salah_mcp.portal import pyexec
+
+    allowed = "items = gis.content.search('owner:me')\nresult = [(i.title, i.size) for i in items]\nprint(len(items))"
+    assert pyexec.read_mode_violations(allowed) == []
+    for code in ("gis.content.get('x').delete()", "item.update({'title': 'x'})", "lyr.edit_features(adds=[])",
+                 "item.sharing.sharing_level = 'EVERYONE'", "import os\nos.remove('f')", "open('x.txt', 'w')",
+                 "flc.manager.update_definition({})", "user.update_role('org_admin')", "gis._con.post('u', {})",
+                 "eval('1')", "role.privileges = []", "lyr.manager.truncate()", "g.add_users(['a'])"):
+        assert pyexec.read_mode_violations(code), code
+
+
+def test_portal_python_runs_captures_and_gates_write_mode(monkeypatch):
+    from arcgis_pro_salah_mcp.portal import pyexec, safety
+
+    monkeypatch.setattr(pyexec, "_namespace", lambda connection, code: {"result": None, "gis": None})
+    safety.register_secret("tok-123456")
+    out = pyexec.run("print('hi tok-123456')\nresult = {'n': 2}")
+    assert out["ok"] is True and out["data"]["result"] == {"n": 2}
+    assert out["data"]["stdout"].strip() == "hi ***"
+    assert pyexec.run("x.delete()")["code"] == "read_mode_blocked"
+    assert pyexec.run("def (:")["code"] == "syntax_error"
+    assert pyexec.run("result = 1", mode="write")["code"] == "confirm_required"
+    monkeypatch.setenv("ARCGIS_SALAH_ALLOW_PORTAL_WRITE_EXEC", "false")
+    assert pyexec.run("result = 1", mode="write", confirm=True)["code"] == "disabled"
+    monkeypatch.delenv("ARCGIS_SALAH_ALLOW_PORTAL_WRITE_EXEC")
+    assert pyexec.run("raise ValueError('boom')")["code"] == "exception"
+    s1 = pyexec.run("counter = 41", session_id="t1")
+    s2 = pyexec.run("result = counter + 1", session_id="t1")
+    assert s1["ok"] and s2["data"]["result"] == 42
+
+
+def test_portal_rest_host_allowlist_and_post_confirm(monkeypatch):
+    from arcgis_pro_salah_mcp.portal import connections, rest
+
+    hosts = {"www.arcgis.com", "utility.arcgis.com"}
+    assert rest.host_allowed("https://services3.arcgis.com/x/FeatureServer/0/query", hosts, True)
+    assert not rest.host_allowed("https://evil.example.com/steal", hosts, True)
+    assert not rest.host_allowed("https://services3.arcgis.com/x", {"gis.company.com"}, False)
+    sent = []
+
+    class Con:
+        def get(self, url, params):
+            sent.append(("GET", url))
+            return {"nextStart": 11, "results": []}
+
+        def post(self, url, params):
+            sent.append(("POST", url))
+            return {"success": True}
+
+    gis = type("G", (), {"url": "https://www.arcgis.com", "properties": {"isPortal": False, "helperServices": {}},
+                         "_con": Con()})()
+    monkeypatch.setattr(connections, "get", lambda name="default": gis)
+    got = rest.request("portals/self")
+    assert got["ok"] and got["data"]["next"] == {"start": 11}
+    assert sent[-1][1].endswith("/sharing/rest/portals/self")
+    assert rest.request("https://services1.arcgis.com/o/arcgis/rest/services/x/FeatureServer/0/query",
+                        method="POST")["ok"]                                      # read-only POST is free
+    assert rest.request("content/users/me/items/x/delete", method="POST")["code"] == "confirm_required"
+    assert rest.request("https://evil.example.com/x")["code"] == "host_not_allowed"
+
+
+def test_portal_knowledge_search_flags_deprecations():
+    from arcgis_pro_salah_mcp.portal import knowledge
+
+    entries = [
+        {"q": "arcgis.gis.ContentManager.add", "k": "method", "s": "(self, item_properties)", "d": "Adds content",
+         "dep": "2.3.0 Removed in: 3.0.0. Use Folder.add() instead."},
+        {"q": "arcgis.gis._impl._content_manager.Folder.add", "k": "method", "s": "(self, item_properties, file)",
+         "d": "Adds an item to the folder"},
+        {"q": "arcgis.features.managers.FeatureLayerCollectionManager.create_view", "k": "method", "s": "(name)",
+         "d": "Creates a view of the hosted feature layer"},
+    ]
+    hits = knowledge.search_entries(entries, "add")
+    assert hits[0]["qualified_name"].endswith("Folder.add")                  # deprecated one ranks lower
+    dep = next(h for h in hits if h["qualified_name"] == "arcgis.gis.ContentManager.add")
+    assert dep["deprecated"] and "Folder.add" in dep["use_instead"]
+    assert knowledge.search_entries(entries, "create view")[0]["qualified_name"].endswith("create_view")
+    assert knowledge.search_entries(entries, "zzz") == []
+
+    def old():
+        """Do a thing.
+
+        .. deprecated:: 2.3.0
+           Removed in: 3.0.0. Use `Folder.add()` instead.
+        """
+
+    summary, deprecated = knowledge._summary(old)
+    assert summary == "Do a thing." and "Folder.add" in deprecated
+    doc = "Intro\n\n**Parameter**  **Description**\nx  the x\n\n:return: thing\n\n.. code-block:: python\n  f()"
+    assert knowledge._section(doc, "parameters").startswith("**Parameter**")
+    assert knowledge._section(doc, "examples").startswith(".. code-block")
+
+
+def test_portal_content_helpers(tmp_path, monkeypatch):
+    import zipfile
+
+    from arcgis_pro_salah_mcp.portal import connections, content
+
+    csv_file = tmp_path / "pts.csv"
+    csv_file.write_text("name,lat,lon\na,1,2\n", encoding="utf-8")
+    assert content._prepare_upload(str(csv_file))[1:3] == ("CSV", "csv")
+    for ext in (".shp", ".shx", ".dbf", ".prj"):
+        (tmp_path / f"roads{ext}").write_bytes(b"x")
+    zipped, kind, _, note = content._prepare_upload(str(tmp_path / "roads.shp"))
+    assert kind == "Shapefile" and "sidecar" in note
+    assert sorted(zipfile.ZipFile(zipped).namelist()) == ["roads.dbf", "roads.prj", "roads.shp", "roads.shx"]
+    gdb = tmp_path / "data.gdb"
+    gdb.mkdir()
+    (gdb / "a00000001.gdbtable").write_bytes(b"x")
+    (gdb / "x.lock").write_bytes(b"x")
+    zipped, kind, _, _ = content._prepare_upload(str(gdb))
+    assert kind == "File Geodatabase" and all(not n.endswith(".lock") for n in zipfile.ZipFile(zipped).namelist())
+    assert content._prepare_upload(str(zipped))[1] == "File Geodatabase"
+    props, rejected = content._clean_props({"title": "T", "tags": "a, b", "owner": "x"})
+    assert props == {"title": "T", "tags": ["a", "b"]} and rejected == ["owner"]
+    assert content.share(["a" * 32], level="world")["code"] == "bad_argument"   # validated before connecting
+
+    captured = {}
+
+    class Content:
+        def advanced_search(self, **kw):
+            captured.update(kw)
+            return {"results": [{"id": "1" * 32, "title": "A", "type": "Web Map", "owner": "me"}], "total": 1,
+                    "nextStart": -1}
+
+    me = type("Me", (), {"username": "jdoe_gis"})()
+    gis = type("G", (), {"url": "https://www.arcgis.com", "properties": {"isPortal": False, "id": "ORG"},
+                         "content": Content(), "users": type("U", (), {"me": me})()})()
+    monkeypatch.setattr(connections, "get", lambda name="default": gis)
+    res = content.search("title:roads", item_type="Web Map", owner="me")
+    assert res["ok"] and res["data"]["items"][0]["item_url"].endswith("id=" + "1" * 32)
+    assert "owner:jdoe_gis" in captured["query"] and "orgid:ORG" in captured["query"]
+    assert captured["filter"] == 'type:"Web Map"' and res["data"]["next_start"] is None
+
+
+def test_portal_layer_edit_rules_and_renderers(monkeypatch):
+    from arcgis_pro_salah_mcp.portal import connections, layers
+
+    class Feat:
+        def __init__(self, attrs):
+            self.attributes = attrs
+
+    class FS:
+        def __init__(self, feats):
+            self.features = [Feat(a) for a in feats]
+
+    edits = []
+
+    class Lyr:
+        url = "https://services.arcgis.com/o/arcgis/rest/services/s/FeatureServer/0"
+        properties = {"name": "pts", "objectIdField": "OBJECTID", "geometryType": "esriGeometryPoint",
+                      "fields": [{"name": "OBJECTID"}, {"name": "KIND"}, {"name": "POP"}],
+                      "drawingInfo": {"labelingInfo": [{"x": 1}]}}
+
+        def query(self, where="1=1", return_count_only=False, return_ids_only=False, object_ids=None,
+                  out_statistics=None, out_fields=None, **kw):
+            if return_count_only:
+                return 3
+            if return_ids_only:
+                return {"objectIds": [1, 2, 3]}
+            if object_ids:
+                return FS([{"OBJECTID": 1, "KIND": "old"}])
+            if out_statistics:
+                return FS([{"KIND": "a", "n": 5}, {"KIND": "b", "n": 2}])
+            return FS([{"POP": v} for v in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)])
+
+        def edit_features(self, **kw):
+            edits.append(kw)
+            key = next(k for k in ("adds", "updates", "deletes") if k in kw)
+            n = len(kw[key]) if isinstance(kw[key], list) else len(str(kw[key]).split(","))
+            return {f"{key[:-1]}Results": [{"success": True, "objectId": i} for i in range(n)]}
+
+    lyr = Lyr()
+    monkeypatch.setattr(connections, "get", lambda name="default": object())
+    monkeypatch.setattr(layers, "open_layer", lambda gis, target, layer=0: (lyr, None, None))
+    assert layers.edit("edit", "t", updates=[{"KIND": "x"}])["code"] == "bad_argument"     # no OBJECTID
+    dry = layers.edit("edit", "t", updates=[{"OBJECTID": 1, "KIND": "new"}], dry_run=True)
+    assert dry["data"]["preview"]["update_diff"][0]["changes"]["KIND"] == {"from": "old", "to": "new"}
+    assert not edits
+    assert layers.edit("edit", "t", where="KIND='x'")["code"] == "confirm_required"         # deletes
+    done = layers.edit("edit", "t", adds=[{"KIND": "a"}, {"KIND": "b"}], updates=[{"OBJECTID": 1, "KIND": "n"}],
+                       batch_size=1)
+    assert done["ok"] and done["data"]["result"]["adds"]["succeeded"] == 2 and len(edits) == 3
+    monkeypatch.setenv("ARCGIS_SALAH_MAX_EDITS", "1")
+    assert layers.edit("edit", "t", adds=[{"a": 1}, {"a": 2}])["code"] == "too_many"
+    assert layers.edit("calculate", "t", where="1=1",
+                       expressions={"field": "KIND", "value": "z"})["code"] == "confirm_required"
+
+    unique = layers.build_renderer(lyr, {"type": "unique", "field": "KIND"})
+    assert [u["value"] for u in unique["uniqueValueInfos"]] == ["a", "b"] and unique["defaultSymbol"] is None
+    breaks = layers.build_renderer(lyr, {"type": "class_breaks", "field": "POP", "classes": 5})
+    assert [b["classMaxValue"] for b in breaks["classBreakInfos"]] == [2.0, 4.0, 6.0, 8.0, 10.0]
+    assert layers.build_renderer(lyr, {"type": "uniqueValue", "field1": "X"})["type"] == "uniqueValue"  # raw JSON
+    merged = layers._merge_drawing(lyr, renderer={"type": "simple"})
+    assert merged["labelingInfo"] == [{"x": 1}] and merged["renderer"] == {"type": "simple"}
+
+
+def test_portal_maps_helpers():
+    from arcgis_pro_salah_mcp.portal import maps
+
+    assert maps._union([[[1, 2], [3, 4]], None, [[0, 5], [2, 9]]]) == [[0, 2], [3, 9]]
+    layers = [{"id": "a1", "title": "Roads", "url": "u1"}, {"id": "b2", "title": "Parcels", "url": "u2"}]
+    assert maps._find(layers, "parcels") == 1 and maps._find(layers, 0) == 0
+    with pytest.raises(LookupError):
+        maps._find(layers, "nope")
+    popup = maps._popup({"displayField": "NAME", "fields": [{"name": "OBJECTID"}, {"name": "NAME", "alias": "Name"},
+                                                            {"name": "Shape__Area"}]})
+    visible = {f["fieldName"]: f["visible"] for f in popup["fieldInfos"]}
+    assert popup["title"] == "{NAME}" and visible == {"OBJECTID": False, "NAME": True, "Shape__Area": False}
+    summary = maps._summary({"baseMap": {"title": "Topographic"}, "operationalLayers": [
+        {"id": "x", "title": "T", "layerType": "ArcGISFeatureLayer", "popupInfo": {}, "layerDefinition": {
+            "drawingInfo": {"renderer": {"type": "classBreaks"}}, "definitionExpression": "POP > 5"}}]})
+    assert summary["basemap"] == "Topographic" and summary["layers"][0]["renderer"] == "classBreaks"
+    assert summary["layers"][0]["definitionExpression"] == "POP > 5"
+
+
+def test_portal_connections_validate_before_signing_in():
+    from arcgis_pro_salah_mcp.portal import connections
+
+    assert connections.connect(name="9bad")["code"] == "bad_name"
+    assert connections.connect(source="carrier-pigeon")["code"] == "bad_source"
+    assert connections.connect(action="fly")["code"] == "bad_action"
+    with pytest.raises(RuntimeError):
+        connections.get("never_opened")
+    assert connections._looks_expired(RuntimeError("Invalid token. (Error Code: 498)"))
+    assert not connections._looks_expired(RuntimeError("403 forbidden"))
+    assert connections.connect(action="list")["ok"] is True
+
+
+def test_toolset_aliases_and_portal_groups():
+    from arcgis_pro_salah_mcp import server
+
+    assert server._toolset_of("portal_layer_edit") == "portal_data"
+    assert server._toolset_of("portal_users") == "portal_admin"
+    assert server._toolset_of("portal_search") == "portal_base"
+    assert server._toolset_of("portal_map") == "portal_maps"
+    assert server._toolset_of("pro_batch") == "core" and server._toolset_of("pro_egdb_replica") == "egdb"
+    assert set(server.TOOLSET_ALIASES["portal"]) == {g for g in server.TOOLSETS if g.startswith("portal_")}
+
+
+def test_server_merged_tools_validate_arguments_without_a_backend():
+    from arcgis_pro_salah_mcp import server
+
+    assert server.pro_layer("add")["code"] == "bad_argument"                      # no data_path
+    assert server.pro_layer("teleport")["code"] == "bad_action"
+    assert server.pro_analysis("buffer", "roads")["code"] == "bad_argument"       # no out/distance
+    assert server.pro_query("rows")["code"] == "bad_argument"                     # no dataset
+    assert server.pro_domain("create", workspace="w")["code"] == "bad_argument"
+    assert server.live_add_to_project("C:/x/file.txt")["code"] == "bad_argument"
+    assert server.webapp_create("t", kind="poster")["code"] == "bad_argument"
+    assert server.pro_server("toolsets")["data"]["active_tools"] == len(server.mcp._tool_manager._tools)
+    assert server.pro_server("status")["ok"] is True
+    assert server.pro_symbology("symbols")["ok"] is True                         # pure: no arcpy needed
+
+
+def test_no_tool_function_shadows_a_module_alias():
+    """A tool named like an imported module alias replaces the module at import time (pro_symbology did:
+    every kind but categorized/graduated would have raised AttributeError). Caught by pyflakes, now by a test."""
+    import ast
+
+    from arcgis_pro_salah_mcp import server
+
+    tree = ast.parse(Path(server.__file__).read_text(encoding="utf-8"))
+    aliases = {a.asname or a.name for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+               for a in node.names}
+    functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert not aliases & functions, aliases & functions
+
+
+def test_resources_and_prompts_are_served():
+    import asyncio
+    import re
+
+    from arcgis_pro_salah_mcp import server
+
+    async def go():
+        resources = {str(r.uri) for r in await server.mcp.list_resources()}
+        prompts = {p.name for p in await server.mcp.list_prompts()}
+        guide = await server.mcp.read_resource("arcgis://guide/portal-users")
+        index = await server.mcp.read_resource("arcgis://guides")
+        rendered = await server.mcp.get_prompt("onboard_users_from_csv", {"csv_path": "C:/u.csv"})
+        return resources, prompts, guide, index, rendered
+
+    resources, prompts, guide, index, rendered = asyncio.run(go())
+    guide_files = {p.stem for p in server.GUIDES_DIR.glob("*.md")}
+    assert {f"arcgis://guide/{g}" for g in guide_files} <= resources
+    assert {"arcgis://guides", "arcgis://live/project", "arcgis://portal/my-content"} <= resources
+    # status / toolsets / module map are tools (pro_server, portal_api), not duplicated as resources
+    assert not {"arcgis://toolsets", "arcgis://server/status", "arcgis://portal/module-map"} & resources
+    assert "arcgis://guide/" not in " ".join(m.content.text for m in rendered.messages)  # prompts use the tool
+    assert {"plan_big_task", "onboard_users_from_csv", "org_audit", "explore_arcgis_api"} <= prompts
+    assert "org_admin" in list(guide)[0].content and "portal-users" in list(index)[0].content
+    assert "C:/u.csv" in rendered.messages[0].content.text
+    # every tool a playbook or the instructions name must exist
+    names = set(server.mcp._tool_manager._tools)
+    text = " ".join(p.read_text(encoding="utf-8") for p in server.GUIDES_DIR.glob("*.md")) + server.INSTRUCTIONS
+    mentioned = set(re.findall(r"\b((?:pro|portal|live|webapp)_[a-z_]+)\b", text))
+    groups = set(server.TOOLSETS) | set(server.TOOLSET_ALIASES)
+    unknown = {m for m in mentioned if m not in names and m not in groups and not m.endswith("_")}
+    assert not unknown, unknown
+
+
+def test_playbooks_are_reachable_through_a_tool_in_any_client():
+    from arcgis_pro_salah_mcp import server
+
+    topics = server.pro_server("guide")["data"]["topics"]
+    assert set(topics) == {p.stem for p in server.GUIDES_DIR.glob("*.md")}
+    got = server.pro_server("guide", topic="arcgis://guide/portal-layers.md")["data"]
+    assert got["topic"] == "portal-layers" and "create_view" in got["markdown"]
+    assert server.pro_server("guide", topic="nope")["code"] == "bad_argument"
+
+
+def test_portal_item_resource_template_returns_item_context(monkeypatch):
+    import asyncio
+
+    from arcgis_pro_salah_mcp import server
+    from arcgis_pro_salah_mcp.portal import connections, content
+
+    class Item(dict):
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError:
+                raise AttributeError(name) from None
+
+        def get_data(self):
+            return {"baseMap": {"title": "Topographic"},
+                    "operationalLayers": [{"id": "a", "title": "Roads", "layerType": "ArcGISFeatureLayer"}]}
+
+    item = Item(id="a" * 32, title="City map", type="Web Map", owner="me", access="private", typeKeywords=[])
+    gis = type("G", (), {"url": "https://www.arcgis.com",
+                         "content": type("C", (), {"get": staticmethod(lambda i: item if i == "a" * 32 else None)})()})()
+    monkeypatch.setattr(connections, "get", lambda name="default": gis)
+    ctx = content.item_context("a" * 32)
+    assert ctx["ok"] and ctx["data"]["map"]["basemap"] == "Topographic"
+    assert ctx["data"]["map"]["layers"][0]["title"] == "Roads"
+
+    async def go():
+        templates = [t.uriTemplate for t in await server.mcp.list_resource_templates()]
+        body = await server.mcp.read_resource("arcgis://portal/item/" + "a" * 32)
+        missing = await server.mcp.read_resource("arcgis://portal/item/not-an-id")
+        return templates, list(body)[0].content, list(missing)[0].content
+
+    templates, body, missing = asyncio.run(go())
+    assert "arcgis://portal/item/{item_id}" in templates
+    assert json.loads(body)["title"] == "City map"
+    assert "not an item id" in json.loads(missing)["error"]                   # error envelope, not a crash
+
+
+def test_stdio_guard_routes_prints_off_the_protocol_channel(monkeypatch, capsys):
+    import io
+    import sys
+    import threading
+
+    from arcgis_pro_salah_mcp import stdio_guard
+
+    class Real(io.StringIO):
+        buffer = object()
+
+    real = Real()
+    monkeypatch.setattr(sys, "stdout", real)
+    router = stdio_guard.install()
+    assert router.buffer is Real.buffer and stdio_guard.install() is router       # idempotent
+    print("stray")
+    assert real.getvalue() == "" and "stray" in capsys.readouterr().err
+    buf = io.StringIO()
+    router.buffers[threading.get_ident()] = buf
+    print("captured")
+    router.buffers.pop(threading.get_ident())
+    assert buf.getvalue() == "captured\n"

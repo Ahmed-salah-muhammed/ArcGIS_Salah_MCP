@@ -37,5 +37,5 @@ Repository = "https://github.com/Ahmed-salah-muhammed/ArcGIS-Pro_Salah_MCP"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Ship the JS web-app templates inside the wheel.
-arcgis_pro_salah_mcp = ["webapp/templates/*"]
+# Ship the JS web-app templates and the playbooks (served as arcgis://guide/<topic> resources) inside the wheel.
+arcgis_pro_salah_mcp = ["webapp/templates/*", "guides/*.md"]

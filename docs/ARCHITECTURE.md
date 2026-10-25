@@ -115,7 +115,7 @@ together (core classes load via `$arcgis.import()`, no AMD `require`). Three
 generators, each emitting a no-build static site:
 - `webapp_create` → `index.html` + `app.js` + `config.js`: a web app that loads a
   saved web map (keeps its symbology/labeling) or hosted layers, with widgets.
-- `webapp_create_dashboard` → `index.html` + `dashboard.js` + `config.js`: an
+- `webapp_create kind=dashboard` → `index.html` + `dashboard.js` + `config.js`: an
   Esri-Dashboard-style app (Calcite shell with live indicators, a category
   breakdown and a "features in view" list that recompute on zoom/pan, plus a
   Light/Dark toggle). Indicators are data-driven — fields are introspected at
@@ -206,9 +206,9 @@ ArcGIS-Pro_Salah_MCP/                     (repo root — already initialized)
 2. `live_export_layout(...)` *(optional)* → a PDF of the current layout.
 3. The buffered feature class lives in the project's gdb on disk → switch to
    headless if needed, or have the add-in return its path.
-4. `portal_connect(profile="agol")` → `portal_publish_layer(<fc>, "City Buffers")`
+4. `portal_publish(path=<fc>, title="City Buffers")` (signed in through ArcGIS Pro automatically)
    → hosted feature layer **item id**.
-5. `portal_create_webmap("City Buffers", [item_id])` → **webmap id**.
+5. `portal_map(action="create", title="City Buffers", layers=[item_id])` → **webmap id**.
 6. `webapp_create("City Buffers", webmap_id=<id>, widgets=[...])` → static site.
 
 Two threads of execution (live add-in + in-process ArcPy/arcgis) cooperate
