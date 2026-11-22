@@ -12,7 +12,7 @@ a different Esri technology:
 - `webapp_*` → static ArcGIS Maps SDK for JS **5.0** generator (no backend):
   `webapp_create` (`kind=app|dashboard`), `webapp_github_pipeline` (deploy to GitHub + Pages)
 
-72 tools (was 156: related operations were merged into one tool with an `action` argument), 23 MCP
+74 tools (was 156: related operations were merged into one tool with an `action` argument), 23 MCP
 resources + 1 template (playbooks `arcgis://guide/<topic>`, live project, my content, one item) and 11 MCP
 prompts, grouped into toolsets (see
 **Performance** below).
@@ -24,6 +24,10 @@ Canonical agent workflow: **Pro (analyze) → Portal (publish) → WebApp (visua
 # Tests — must pass with NO ArcGIS installed (this is the whole CI surface)
 PYTHONPATH=src python -m pytest tests/test_core.py
 PYTHONPATH=src python -m pytest tests/test_core.py::test_webapp_generator_with_webmap
+
+# End-to-end, with a real ArcGIS Pro install (skipped without arcpy). The live group runs only with Pro open
+# + the add-in + ARCGIS_E2E_LIVE=1: it adds a temporary layer to the open map, edits it and removes it.
+"C:\Program Files\ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe" -m pytest tests/test_full_e2e.py -q
 ```
 ```powershell
 # PowerShell equivalent (this repo is Windows-only in practice; `&&` is not valid in PS 5.1)
@@ -51,7 +55,7 @@ dotnet build SalahAIBridge\SalahAIBridge.csproj -c Release
 # → bin\Release\net10.0-windows\SalahAIBridge.esriAddinX ; double-click to install.
 # ArcGIS Pro MUST be closed before reinstalling, or the old add-in stays loaded.
 # Pro installs it to  …\Documents\ArcGIS\AddIns\ArcGISPro\{6f3a1c2e-…}\  — check the
-# version in Add-In Manager (Config.daml `version`, currently 0.1.6) to confirm a reload.
+# version in Add-In Manager (Config.daml `version`, currently 0.1.7; `live_ping` returns `addin_version`) to confirm a reload.
 ```
 
 ## Architecture
@@ -159,6 +163,19 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   Keyword *prefix* matching, not substring ("age" must not match "acreage").
   Because it is pure it is unit-tested in `test_core.py` and also runs inside the
   publish script the ribbon shells out to.
+- `pro/locks.py` — **a dataset that is a layer in the open Pro map is locked for this process** (reported by the
+  user: they had to remove the layer from the Contents pane before `pro_*` edits). Reproduced with two arcpy
+  processes on a file gdb: AddField / DeleteField -> `ERROR 000464: Cannot get exclusive schema lock`,
+  CalculateField -> `ERROR 160706: Cannot acquire a lock`; reads are fine. `ops._arcpy()` returns
+  `lock_aware(arcpy)`: every `arcpy.<toolbox>.<Tool>` call that fails with a lock error is sent once to the
+  bridge's `run_gp` (named parameters turned positional with `inspect.signature`, skipped ones `""`, 900 s
+  timeout), where the lock is Pro's own; the op's result then carries `ran_in`. No bridge / read-only mode ->
+  `DatasetLocked` (`guard` returns `code="locked"` + `hint`). So `schema.py`, `validate.py` and `pipeline.py`
+  and `egdb.py` get it too (they use `ops._arcpy()`); `unet` and `geoai` import `arcpy.un` / `arcpy.ia` /
+  `arcpy.geoai` themselves and wrap them with `locks.wrap_toolbox`. **Verified live** (Pro 3.7, add-in 0.1.7):
+  `pro add_field` on a layer of the open map returned `ran_in` and the field appeared in Pro. One case stays
+  locked even inside Pro: a layer with UNSAVED edits cannot change its schema; the error then says to save or
+  discard (`tests/test_full_e2e.py` covers both).
 - `arcpy_thread.py` — **one thread owns arcpy** (the Python counterpart of Pro's MCT). Measured: with a
   PostgreSQL gdb, `arcpy.ListVersions` (ERROR 87395), `ArcSDESQLExecute` (ERROR 87413) and
   `arcpy.da.ListVersions` (TypeError(path)) fail on ANY thread other than the one that imported arcpy -
@@ -205,12 +222,16 @@ State & backend notes:
 ## The live bridge (`live_*` ⇄ SalahAIBridge)
 `docs/PROTOCOL.md` is authoritative for the wire contract — update it whenever
 you touch either side. `live/client.py` is stdlib-`urllib` only and **never
-raises**: transport failures come back as `err("bridge unreachable: …")`.
+raises**: transport failures come back as `err("bridge unreachable: …")`. It first probes the port with a
+0.25 s socket: with Pro closed urllib took **2.1 s** per call to report the refused connection (measured),
+now 0.28 s. `post(..., timeout=)` is 30 s by default and 900 s for `run_gp`.
 
 - **`live/policy.py` gates every mutating command client-side, before the HTTP
   request is sent.** Two rails: read-only mode (`ARCGIS_BRIDGE_READONLY` blocks
-  `run_gp`/`add_layer`/`export_layout`, code `readonly`) and destructive
-  confirmation (`run_gp` needs `confirm=True`, code `confirm_required`). Adding a
+  `run_gp`/`add_layer`/`export_layout`/`layer_set`/`edit_features`/`edit_session`, code `readonly`) and
+  destructive confirmation (`run_gp`; deletes in `edit_features`; `save`/`discard` of the edit session, which
+  act on the user's own unsaved edits too: `policy.needs_confirm`, code `confirm_required`). `selection` and
+  `layer_info` are reads. Adding a
   new `live_*` op means classifying its command in `READ_ONLY` / `MUTATING` /
   `DESTRUCTIVE` and calling `policy.check(...)` first. Names there are *protocol*
   commands (`run_gp`), not tool names (`live_run_gp`).
@@ -240,12 +261,29 @@ raises**: transport failures come back as `err("bridge unreachable: …")`.
   confirmed by `GetItems<GeoprocessingProjectItem>`. Trap: the FIRST time a `.pyt` is loaded Pro shows a
   "trust the code source" dialog on the UI thread; every bridge command (even `ping`) then times out until
   the user clicks Trust, after which the pending call completes.
-- **`run_gp`** (`Commands/RunGpCommand.cs`, fixed in add-in 0.1.6): calling `Geoprocessing.MakeValueArray` /
-  `ExecuteToolAsync` straight from the HttpListener thread gave a NullReferenceException for EVERY tool in a
-  live Pro 3.7 (reproduced with CreateFolder; the tool never ran). Now: arguments via `QueuedTask.Run`, the
-  tool started on the UI dispatcher, retried without `AddOutputsToMap`, every attempt in `steps`. Built but not
-  yet run live (Pro was open; reinstalling needs it closed). `BridgeServer` errors now carry `where` (first
-  stack frame).
+- **`run_gp`** (`Commands/RunGpCommand.cs`): failed with a NullReferenceException for EVERY tool until add-in
+  **0.1.7** (0.1.6's thread fix was not the cause). `ExecuteToolAsync` has two overloads (read by reflection
+  from `ArcGIS.Desktop.Core.dll` 3.7: `Geoprocessing` lives there, not in `ArcGIS.Desktop.GeoProcessing.dll`):
+  `(toolPath, values, environments = null, CancellationToken? cancelToken = null, callback = null, flags)` and
+  `(toolPath, values, environments, CancelableProgressor progressor, flags)`. The old five-argument call
+  `(tool, values, env, null, flags)` bound to the SECOND with a null progressor and `execute_helper.eval_modal`
+  threw. Now the first overload is called with `flags:` named (fallbacks: `CancelableProgressor.None`, then
+  without `AddOutputsToMap`), arguments built in `QueuedTask.Run`, started on the UI dispatcher.
+  **Verified live**: AddField and CalculateField ran in Pro 3.7. `BridgeServer` errors carry `where`.
+- **Add-in 0.1.7 commands, all verified live on Pro 3.7** (33 scripted steps + `tests/test_full_e2e.py`):
+  `selection` (get / select / clear; `Map.GetSelection().ToDictionary()`, `FeatureLayer.Select`),
+  `layer_info` / `layer_set` (definition query, visibility, transparency, Arcade labels through the CIM label
+  class, renderers through `CreateRenderer` with CIM colour ramps built in code so no style is needed, rename,
+  remove), `edit_features` (adds / updates / deletes in ONE `EditOperation`: undoable, inside the user's edit
+  session, geometry `{x, y, wkid}` or Esri JSON projected to the layer, dates as ISO strings) and
+  `edit_session` (status / undo / redo / save / discard). MCP tools: `live_map` actions `selection`, `select`,
+  `clear_selection`; `live_layer`; `live_edit`. Traps found live: with `QueryFilter.SubFields` a row still
+  lists every field (the others null), so `query`/`selection` keep only the requested ones; after a GP tool
+  ran, `MapView.Active` was null, so `MapUtil.ResolveMap` falls back to the project's first map; reading
+  `FrameworkApplication.Panes` from the MCT to find another view left Pro NOT RESPONDING - do not.
+- **How the live checks were run**: Pro closed -> copy the built `.esriAddinX` over the installed one ->
+  start `ArcGISPro.exe <throwaway .aprx>` (a `saveACopy` of a small project, emptied, one test feature class)
+  -> wait for port 2026 -> run the checks -> `taskkill /F`. The bridge answers ~20 s after Pro starts.
 - C# handlers must do all project/map/layout work inside `QueuedTask.Run(...)`
   (Main CIM Thread); the HttpListener callback is a worker thread.
 
@@ -289,7 +327,9 @@ anything here; several obvious ideas turned out to be wrong.
 | `import arcgis` | 17 s after arcpy is loaded; 33-60 s cold |
 | `GIS("pro")` / a portal search | 1.0 s / 0.2-0.6 s |
 | arcgis API index build | 13 s once per arcgis version (256 s before the walker stopped importing `arcgis.learn` and skipped `arcgis.map.dataclasses`); disk cache 0.1 s |
-| full tool schema, sent every request | 72 tools = **~23.6k tokens** (chars/4; the old 156 tools were ~22.8k the same way) |
+| full tool schema, sent every request | 74 tools = **~24.8k tokens** (chars/4; the old 156 tools were ~22.8k the same way) |
+| server start over stdio -> `initialize` answered | 5.4 s; `tools/list` 40 ms; `pro_server action=status` 12 ms |
+| a `live_*` call with Pro closed | 0.28 s (was 2.1 s before the socket probe) |
 
 The dominant cost is **round trips**, not ArcPy: every extra tool call is a full
 model inference. Four mechanisms address that:
@@ -507,15 +547,19 @@ if you keep Pro somewhere non-standard.
 
 ## Tests
 `tests/test_core.py` must stay backend-free and green with **no ArcGIS installed**
-(139 tests; they also pass with `arcgis`/`arcpy` blocked from import). It covers the envelope/guard behavior, graceful ArcPy- and
+(147 tests; they also pass with `arcgis`/`arcpy` blocked from import). It covers the envelope/guard behavior, graceful ArcPy- and
 bridge-absent degradation, the `live/policy.py` rails, `pro/metadata.py` theme
 inference, both webapp generators, the cache (including the gdb-lock-file case
 and the TTL), pipeline placeholder substitution, the `.pyt` and `.atbx`
 generators, toolset gating, the argument validation that deliberately runs
 *before* any backend import, `pro_batch`, and the portal layer against fake GIS objects (every onboarding
 rule, safety rails, the read-mode guard, REST allowlist, layer edits/renderers, knowledge index,
-resources and prompts). Live checks (real stdio, real org) live outside the repo. Anything needing a real ArcGIS install belongs in a
-separate `test_full_e2e.py` (planned), not here.
+resources and prompts). Anything needing a real ArcGIS install is in `tests/test_full_e2e.py` (7 tests, run
+with `arcgispro-py3`, skipped without arcpy): the server over real stdio, pro ops with real arcpy on a
+throwaway gdb, the lock a second process holds, and - with Pro open, the add-in and `ARCGIS_E2E_LIVE=1` -
+the live commands and the run-inside-Pro lock fallback. The stdio test exists because the server once could
+not start under `arcgispro-py3` at all (`mcp` 1.28 in the shared user site-packages, `httpx-sse` missing) and
+nothing backend-free could see it. Portal live checks (real org) still live outside the repo.
 
 **Validate before importing the backend.** Ops such as `schema.add_attribute_rule`
 and `unet.trace` check their arguments first and only then call `_arcpy()`. A bad

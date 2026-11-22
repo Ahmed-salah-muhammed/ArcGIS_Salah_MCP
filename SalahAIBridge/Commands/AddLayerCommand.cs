@@ -21,7 +21,7 @@ namespace SalahAIBridge.Commands
                 string path = ParamUtil.GetString(@params, "path")
                     ?? throw new ArgumentException("add_layer requires 'path'.");
 
-                var map = MapView.Active?.Map
+                var map = MapUtil.ActiveView()?.Map
                     ?? throw new InvalidOperationException("No active map view.");
 
                 var uri = new Uri(path);

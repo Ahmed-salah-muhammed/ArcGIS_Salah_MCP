@@ -20,9 +20,10 @@ namespace SalahAIBridge.Commands
         {
             if (string.IsNullOrWhiteSpace(mapName))
             {
-                var active = MapView.Active?.Map;
+                var active = ActiveView()?.Map
+                    ?? Project.Current?.GetItems<MapProjectItem>().FirstOrDefault()?.GetMap();
                 if (active == null)
-                    throw new InvalidOperationException("No active map view.");
+                    throw new InvalidOperationException("No map is open in this project.");
                 return active;
             }
 
@@ -33,6 +34,15 @@ namespace SalahAIBridge.Commands
                 throw new InvalidOperationException($"Map '{mapName}' not found.");
             return item.GetMap();
         }
+
+        /// <summary>
+        /// The active map view, or null. Seen live: after a geoprocessing tool ran, the focus was on another
+        /// pane, <c>MapView.Active</c> was null and every command failed with "No active map view" although
+        /// the map was open; <see cref="ResolveMap"/> therefore falls back to the project's first map.
+        /// The panes are NOT searched for another view here: this runs on the MCT, and reading
+        /// FrameworkApplication.Panes from it left Pro not responding (tried in 0.1.7's development).
+        /// </summary>
+        public static MapView ActiveView() => MapView.Active;
 
         public static Layer FindLayer(Map map, string name)
         {

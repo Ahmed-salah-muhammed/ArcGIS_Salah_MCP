@@ -449,7 +449,7 @@ You want to see **✓ CREATE OK** and **✓ PUSH OK**.
 
 ## Tools
 
-**72 tools in 14 groups, plus 23 resources + 1 resource template and 11 prompts.** Related operations share one tool
+**74 tools in 14 groups, plus 23 resources + 1 resource template and 11 prompts.** Related operations share one tool
 with an `action` argument — `pro_layer action=add|remove|rename|visibility|opacity`, `portal_item
 action=get|update|move|delete|export|…` — so the model chooses between fewer, clearer tools. A wrong action
 returns `code: "bad_action"` with the valid list; a missing argument is reported before ArcPy or arcgis is
@@ -690,10 +690,20 @@ Geodatabase Connection Properties), and database-level backup/restore.
 
 ### Live (`live_*`) — the OPEN Pro session via the .NET bridge
 
-`live_ping`, `live_map` (layers / query / zoom / add_layer), `live_run_gp` (confirm; add-in 0.1.6+),
+`live_ping`, `live_map` (layers / query / zoom / add_layer / **selection / select / clear_selection**),
+**`live_layer`** (a layer's info, or how it is shown in the open map: definition query, visibility,
+transparency, Arcade labels, simple / unique / graduated renderer, rename, remove), **`live_edit`** (add /
+update / delete features in one undoable Pro edit operation, add_field, calculate, and the edit session:
+status / undo / redo / save / discard), `live_run_gp` (confirm; add-in 0.1.7+),
 `live_export_layout`, `live_get_request` (what you queued from the ribbon), **`live_add_to_project`** (a `.sde`
 / `.gdb` into the open project's Databases — add-in 0.1.5+; an `.atbx` / `.tbx` / `.pyt` into its Toolboxes —
-add-in 0.1.4+, verified on Pro 3.7).
+add-in 0.1.4+, verified on Pro 3.7). The selection, `live_layer` and `live_edit` need add-in **0.1.7**; all of
+them were run against a live Pro 3.7.
+
+**A layer in the Contents pane is no longer a problem for `pro_*` tools.** They run outside Pro, so a layer of
+the open map is locked for them (`ERROR 000464` / `160706`). With the add-in running, a tool that hits that
+lock is run inside Pro automatically and its result says `ran_in`; without it the error has code `locked` and
+says what to do. A layer with unsaved edits cannot change its schema even in Pro: save or discard first.
 
 ### Portal (`portal_*`) — ArcGIS Online / Enterprise through the ArcGIS API for Python
 
@@ -762,7 +772,7 @@ Measured on a real ArcGIS Pro 3.7 install:
 | Index of the installed arcgis library | 13 s, once per arcgis version (was 256 s before `arcgis.learn` / `arcgis.map.dataclasses` were skipped); then a disk cache, **0.1 s** |
 | `Describe` + `ListFields` + `GetCount` | ~430 ms; cached repeat **1 ms** |
 | `pro_context` over an 11-layer geodatabase | 5.4 s cold, 1.2 s warm |
-| Tool schema, every request | 72 tools ≈ 23.6k tokens (chars/4) |
+| Tool schema, every request | 74 tools ≈ 24.8k tokens (chars/4) |
 
 The biggest cost is the **round trip** — every tool call is a full model inference. So: `pro_context` reads a
 whole project in one call, `pro_pipeline` chains GP tools, and **`pro_batch`** runs several tools of any layer in
@@ -800,7 +810,9 @@ These came out of a real session (an agent driving the server from Claude Deskto
 | A call ran past about a minute, came back as a timeout, and the calls after it hung | The MCP client stops waiting after roughly a minute, while the server ran every tool **on its event loop**, so one long call froze it | Tools no longer block the server: `pro_server action=status` answers instantly and says what is running. For long work (creating a geodatabase, maintenance, replicas, many versions, exports) use **`pro_batch background=true`** (or `pro_pipeline background=true`) and poll **`pro_server action=job`**. The first ArcPy call after the server starts waits for the ~25 s arcpy import (measured ~47 s with a PostgreSQL connection). |
 | `arcpy.ListVersions` → `ERROR 87395`, `ArcSDESQLExecute` → `ERROR 87413`, while the connection itself works | With **PostgreSQL**, ArcPy only works on the thread that imported it; the server imported it on a warm-up thread and ran tools on another (SQL Server was unaffected) | Every ArcPy tool now runs on one dedicated thread that also does the import - the Python counterpart of Pro's Main CIM Thread. |
 | `ArcGISProject("CURRENT")` fails | The server's Python runs outside ArcGIS Pro | `"CURRENT"` is now resolved to the project open in Pro through the live bridge (`pro_execute_code` and every tool that takes a project path). Edits saved to it from outside are overwritten when Pro saves - change the open session with `live_*` tools. |
-| `live_run_gp` → `NullReferenceException` for every tool | The add-in started the tool from its HTTP thread, which is neither Pro's UI thread nor the MCT | Add-in **0.1.6** builds the arguments with `QueuedTask.Run` and starts the tool from the UI thread, reporting each attempt in `steps`; bridge errors now include the failing stack frame (`where`). |
+| `live_run_gp` → `NullReferenceException` for every tool | The add-in's call bound to the `ExecuteToolAsync` overload that takes a progressor, with a null progressor | Fixed in add-in **0.1.7** (verified live on Pro 3.7); each attempt is reported in `steps` and bridge errors include the failing stack frame (`where`). |
+| `ERROR 000464: Cannot get exclusive schema lock` / `ERROR 160706: Cannot acquire a lock` from a `pro_*` tool | The dataset is a layer in the open ArcGIS Pro map, and `pro_*` tools run outside Pro | With add-in 0.1.7 running the tool is run inside Pro automatically (`ran_in` in the result). Otherwise the error has code `locked`: open Pro with the add-in, or remove the layer from the map. Unsaved edits on the layer: save or discard them first. |
+| The server does not start: `ModuleNotFoundError: No module named 'httpx_sse'` | `mcp` was installed or upgraded in the user site-packages that `arcgispro-py3` shares, without its dependency | `"...\arcgispro-py3\python.exe" -m pip install --user httpx-sse` (`pip check` lists what else is missing). |
 | New tools are missing after an update | The MCP client keeps the server process it started; `pip install -e` only takes effect in a new process | Fully quit and reopen the MCP client (Claude Desktop: quit from the tray). |
 
 ---
@@ -963,7 +975,7 @@ Core tests run without any ArcGIS install (CI runs this):
 PYTHONPATH=src python -m pytest tests/test_core.py
 ```
 
-139 tests covering the result envelope/guard behaviour, graceful ArcPy- and
+147 tests covering the result envelope/guard behaviour, graceful ArcPy- and
 bridge-absent degradation, the metadata inference, the schema cache, pipeline
 placeholder substitution, the `.pyt` and `.atbx` generators, toolset gating, the
 argument validation that deliberately runs *before* any backend import, `pro_batch`

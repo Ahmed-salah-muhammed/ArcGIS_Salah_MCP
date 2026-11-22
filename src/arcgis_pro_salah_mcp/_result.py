@@ -49,11 +49,15 @@ def guard(fn: Callable[..., Any]) -> Callable[..., dict]:
         except NotImplementedError as exc:
             return err(f"Not implemented yet: {exc}", code="not_implemented")
         except Exception as exc:  # noqa: BLE001 - we deliberately surface everything
+            # An exception may name its own code and hint (pro.locks.DatasetLocked: code "locked").
+            code = getattr(exc, "code", None)
+            extra = {"hint": exc.hint} if isinstance(getattr(exc, "hint", None), str) else {}
             return err(
                 str(exc),
-                code="exception",
+                code=code if isinstance(code, str) else "exception",
                 type=type(exc).__name__,
                 traceback=traceback.format_exc(),
+                **extra,
             )
 
     return wrapper

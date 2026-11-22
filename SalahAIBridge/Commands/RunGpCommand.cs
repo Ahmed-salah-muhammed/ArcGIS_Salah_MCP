@@ -22,6 +22,8 @@ namespace SalahAIBridge.Commands
     /// tool ran. Now the arguments are built on the MCT (<c>QueuedTask.Run</c>, as Esri's samples do) and
     /// the tool is started from the UI thread, like an add-in button; if adding outputs to the map is
     /// what fails, it is retried without that flag. Every attempt is reported in <c>steps</c>.
+    /// 0.1.6 still failed the same way: its call bound to the progressor overload with a null progressor
+    /// (see the comment at the attempts); fixed in 0.1.7.
     /// </summary>
     public sealed class RunGpCommand : ICommand
     {
@@ -52,23 +54,31 @@ namespace SalahAIBridge.Commands
                 throw new InvalidOperationException("run_gp could not build the tool arguments: " + Describe(ex));
             }
 
-            var attempts = new[]
+            // ExecuteToolAsync has two overloads (read by reflection from ArcGIS.Desktop.Core 3.7):
+            //   (toolPath, values, environments = null, CancellationToken? cancelToken = null, callback = null, flags)
+            //   (toolPath, values, environments, CancelableProgressor progressor, flags)
+            // Add-in 0.1.6 called (tool, values, env, null, flags): five arguments bind to the SECOND one with a
+            // null progressor, and execute_helper.eval_modal threw NullReferenceException for every tool (seen
+            // live). The first overload is called by naming `flags`; the second gets CancelableProgressor.None.
+            var env = environments.Count > 0 ? environments : null;
+            const GPExecuteToolFlags toMap = GPExecuteToolFlags.AddToHistory | GPExecuteToolFlags.AddOutputsToMap;
+            var attempts = new (string, Func<Task<IGPResult>>)[]
             {
                 ("ExecuteToolAsync on the UI thread (outputs added to the map)",
-                    GPExecuteToolFlags.AddToHistory | GPExecuteToolFlags.AddOutputsToMap),
+                    () => Geoprocessing.ExecuteToolAsync(tool, valueArray, env, flags: toMap)),
+                ("ExecuteToolAsync with CancelableProgressor.None (outputs added to the map)",
+                    () => Geoprocessing.ExecuteToolAsync(tool, valueArray, env, CancelableProgressor.None, toMap)),
                 ("ExecuteToolAsync on the UI thread (outputs not added to the map)",
-                    GPExecuteToolFlags.AddToHistory),
+                    () => Geoprocessing.ExecuteToolAsync(tool, valueArray, env, flags: GPExecuteToolFlags.AddToHistory)),
             };
 
             IGPResult result = null;
             string via = null;
-            foreach (var (label, flags) in attempts)
+            foreach (var (label, run) in attempts)
             {
                 try
                 {
-                    var started = FrameworkApplication.Current.Dispatcher.InvokeAsync(() =>
-                        Geoprocessing.ExecuteToolAsync(tool, valueArray,
-                            environments.Count > 0 ? environments : null, null, flags));
+                    var started = FrameworkApplication.Current.Dispatcher.InvokeAsync(run);
                     var running = await started.Task;
                     result = await running;
                     if (result == null)

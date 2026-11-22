@@ -94,15 +94,18 @@ def _ia():
             "The Image Analyst extension is not licensed/available on this machine."
         )
     arcpy.CheckOutExtension("ImageAnalyst")
-    return ia
+    from .locks import wrap_toolbox
+
+    return wrap_toolbox(ia, "ia", arcpy)
 
 
 def _geoai():
     """arcpy.geoai — the foundation-model / embeddings module (Pro 3.3+)."""
     try:
         import arcpy.geoai as g  # type: ignore
+        from .locks import wrap_toolbox
 
-        return g
+        return wrap_toolbox(g, "geoai")
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "arcpy.geoai is unavailable — it needs ArcGIS Pro 3.3+ with the "

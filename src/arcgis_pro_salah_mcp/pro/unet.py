@@ -51,11 +51,12 @@ RULE_TYPES = [
 
 def _un():
     """arcpy.un — present whenever ArcPy is, but guarded for a clear message."""
-    ops._arcpy()
+    arcpy = ops._arcpy()
     try:
         import arcpy.un as un  # type: ignore
+        from .locks import wrap_toolbox
 
-        return un
+        return wrap_toolbox(un, "un", arcpy)  # a locked utility network is run inside the open Pro session
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "arcpy.un (Utility Network toolbox) is unavailable on this install."

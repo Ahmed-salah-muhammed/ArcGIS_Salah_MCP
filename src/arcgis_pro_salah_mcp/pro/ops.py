@@ -33,15 +33,23 @@ def _light_fields(arcpy, dataset: str) -> list[str]:
 
 
 def _arcpy():
-    """Lazily import and return the arcpy module (raises if unavailable)."""
+    """Lazily import arcpy (raises if unavailable), wrapped so a tool that hits a lock held by the open
+    ArcGIS Pro session is run inside that session instead (see ``locks``)."""
     try:
         import arcpy  # type: ignore
-        return arcpy
+        from .locks import lock_aware
+
+        return lock_aware(arcpy)
     except Exception as exc:  # pragma: no cover - depends on ArcGIS install
         raise RuntimeError(
             "ArcPy could not be imported. Run this server with ArcGIS Pro's "
             "arcgispro-py3 interpreter (see bootstrap.py)."
         ) from exc
+
+
+def _ran_in(result: Any) -> dict:
+    """{"ran_in": ...} when a tool was run in the open Pro session because the dataset was locked by it."""
+    return {"ran_in": "the open ArcGIS Pro session (the dataset was locked by it)"} if hasattr(result, "live") else {}
 
 
 def _resolve_current(path: str) -> str:
@@ -369,17 +377,17 @@ def select_by_expression(layer: str, where_clause: str) -> dict:
 @guard
 def add_field(dataset: str, field_name: str, field_type: str = "TEXT") -> dict:
     arcpy = _arcpy()
-    arcpy.management.AddField(dataset, field_name, field_type)
+    result = arcpy.management.AddField(dataset, field_name, field_type)
     cache.invalidate(dataset)
-    return ok({"added_field": field_name, "type": field_type})
+    return ok({"added_field": field_name, "type": field_type, **_ran_in(result)})
 
 
 @guard
 def calculate_field(dataset: str, field: str, expression: str) -> dict:
     arcpy = _arcpy()
-    arcpy.management.CalculateField(dataset, field, expression, "PYTHON3")
+    result = arcpy.management.CalculateField(dataset, field, expression, "PYTHON3")
     cache.invalidate(dataset)
-    return ok({"field": field, "expression": expression})
+    return ok({"field": field, "expression": expression, **_ran_in(result)})
 
 
 @guard
@@ -506,8 +514,8 @@ def reproject(dataset: str, out: str, target_crs: str) -> dict:
 
 @guard
 def repair_geometry(dataset: str) -> dict:
-    _arcpy().management.RepairGeometry(dataset)
-    return ok({"repaired": dataset})
+    result = _arcpy().management.RepairGeometry(dataset)
+    return ok({"repaired": dataset, **_ran_in(result)})
 
 
 @guard
@@ -705,7 +713,7 @@ def run_gp(tool: str, args: list[Any] | None = None, kwargs: dict | None = None)
     result = func(*args, **kwargs)
     # Result objects stringify to their output path(s).
     outputs = [result[i] for i in range(result.outputCount)] if hasattr(result, "outputCount") else [str(result)]
-    return ok({"tool": tool, "outputs": outputs})
+    return ok({"tool": tool, "outputs": outputs, **_ran_in(result)})
 
 
 @guard

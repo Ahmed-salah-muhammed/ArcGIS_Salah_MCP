@@ -29,6 +29,10 @@ namespace SalahAIBridge
         /// <summary>Bumped on breaking protocol changes; surfaced by <c>ping</c>.</summary>
         public const string ProtocolVersion = "1";
 
+        /// <summary>The add-in's version (Config.daml), surfaced by <c>ping</c> so the client knows which
+        /// commands exist.</summary>
+        public const string AddinVersion = "0.1.7";
+
         private readonly int _port;
         private readonly Dictionary<string, ICommand> _commands;
 
@@ -57,6 +61,11 @@ namespace SalahAIBridge
                 ["get_request"]   = new GetRequestCommand(),
                 ["add_toolbox"]   = new AddToolboxCommand(),
                 ["add_database"]  = new AddDatabaseCommand(),
+                ["selection"]     = new SelectionCommand(),
+                ["layer_info"]    = new LayerInfoCommand(),
+                ["layer_set"]     = new LayerSetCommand(),
+                ["edit_features"] = new EditFeaturesCommand(),
+                ["edit_session"]  = new EditSessionCommand(),
             };
         }
 
