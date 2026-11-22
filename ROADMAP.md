@@ -12,7 +12,9 @@ Legend: ✅ done · 🟡 partial / stub · ⬜ planned
 - ✅ **Symbology authoring** (`apply_categorized_symbology`, `apply_graduated_symbology`)
   — `lyr.symbology` UniqueValue / GraduatedColors renderers, color-ramp lookup,
   numeric-field guard. Pending live verification against ArcGIS Pro.
-- ⬜ `e2e` tests against a real ArcGIS Pro install.
+- ✅ `e2e` tests against a real ArcGIS Pro install (`tests/test_full_e2e.py`: real stdio, real arcpy,
+  and the live bridge when Pro is open with `ARCGIS_E2E_LIVE=1`).
+- ✅ A dataset locked by the open Pro session is edited inside it (`pro/locks.py`).
 
 ## Phase 2 — Portal / ArcGIS Online (Layer 2)  ✅ core
 - ✅ `connect` (AGOL default, profile auth), `whoami`
@@ -65,8 +67,11 @@ Legend: ✅ done · 🟡 partial / stub · ⬜ planned
   mutating commands, and **destructive ops require `confirm=True`** (`run_gp`).
   Enforced in `live/policy.py` before any request reaches the bridge; covered by
   backend-free tests.
-- ⬜ Manual round-trip verification of each command against a running ArcGIS Pro
-  ("watch it work").
+- ✅ Add-in **0.1.7**: `run_gp` fixed (it failed for every tool), the user's selection, a layer's display
+  (`live_layer`), and edits through Pro's own edit session (`live_edit`: undoable `EditOperation`).
+- ✅ Round-trip verification against a running ArcGIS Pro 3.7: ping, layers, query, add_layer, run_gp,
+  selection, layer_info / layer_set, edit_features, edit_session (scripted, and in `test_full_e2e.py`).
+  `zoom_to`, `export_layout` and `add_database` were not part of that run.
 - ⬜ Server-side defense-in-depth: enforce read-only / confirm inside the add-in
   too (not just the Python client).
 

@@ -25,7 +25,7 @@ namespace SalahAIBridge.Commands
                     ?? throw new ArgumentException("zoom_to requires 'layer'.");
                 bool selection = ParamUtil.GetBool(@params, "selection");
 
-                var mapView = MapView.Active
+                var mapView = MapUtil.ActiveView()
                     ?? throw new InvalidOperationException("No active map view.");
                 var layer = MapUtil.FindLayer(mapView.Map, layerName);
 

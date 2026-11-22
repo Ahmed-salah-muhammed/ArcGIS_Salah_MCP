@@ -27,7 +27,7 @@ namespace SalahAIBridge.Commands
                 var fields = ParamUtil.GetStringList(@params, "fields");
                 int limit = ParamUtil.GetInt(@params, "limit", 10);
 
-                var map = MapView.Active?.Map
+                var map = MapUtil.ActiveView()?.Map
                     ?? throw new InvalidOperationException("No active map view.");
                 var fl = MapUtil.FindFeatureLayer(map, layerName);
 
@@ -49,6 +49,8 @@ namespace SalahAIBridge.Commands
                                             f.FieldType != FieldType.Blob &&
                                             f.FieldType != FieldType.Raster)
                                 .Select(f => f.Name)
+                                // SubFields only limits what is READ: the row still lists every field (as null)
+                                .Where(n => fields.Count == 0 || fields.Contains(n, StringComparer.OrdinalIgnoreCase))
                                 .ToList();
 
                             var rec = new Dictionary<string, object>();

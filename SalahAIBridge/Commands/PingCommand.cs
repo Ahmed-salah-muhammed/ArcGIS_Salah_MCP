@@ -36,12 +36,13 @@ namespace SalahAIBridge.Commands
 
                 // Prefer the active map view's map name; fall back to the active
                 // pane's caption (e.g. when a layout view is in front).
-                string activeView = MapView.Active?.Map?.Name
+                string activeView = MapUtil.ActiveView()?.Map?.Name
                                     ?? FrameworkApplication.Panes.ActivePane?.Caption;
 
                 return new Dictionary<string, object>
                 {
                     ["protocol_version"] = BridgeServer.ProtocolVersion,
+                    ["addin_version"] = BridgeServer.AddinVersion,
                     ["project"] = project?.Name,
                     ["project_path"] = project?.Path,
                     ["maps"] = maps,

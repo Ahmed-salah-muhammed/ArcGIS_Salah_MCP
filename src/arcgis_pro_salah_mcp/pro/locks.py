@@ -194,5 +194,10 @@ class LockAwareArcpy:
         return dir(self._arcpy)
 
 
+def wrap_toolbox(module: Any, alias: str, arcpy: Any = None) -> Any:
+    """One toolbox module imported on its own (``import arcpy.un as un``), with the same lock handling."""
+    return module if isinstance(module, _Toolbox) else _Toolbox(module, alias, getattr(arcpy, "_arcpy", arcpy))
+
+
 def lock_aware(arcpy: Any) -> Any:
     return arcpy if isinstance(arcpy, LockAwareArcpy) else LockAwareArcpy(arcpy)

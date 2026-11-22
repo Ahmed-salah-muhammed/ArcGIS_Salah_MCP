@@ -776,9 +776,13 @@ def live_ping() -> dict:
 
 @mcp.tool()
 def live_map(action: str = "layers", map_name: str | None = None, layer: str | None = None, selection: bool = False,
-             where: str | None = None, fields: list[str] | None = None, limit: int = 10, path: str | None = None) -> dict:
-    """The open Pro session's map: layers (active or map_name) | query (rows from layer: where, fields, limit) | zoom (to layer, or its selection) | add_layer (dataset path from disk; refused in read-only mode)."""
+             where: str | None = None, fields: list[str] | None = None, limit: int = 10, path: str | None = None,
+             method: str = "new") -> dict:
+    """The open Pro session's map: layers (active or map_name) | query (rows from layer: where, fields, limit) | zoom (to layer, or its selection) | add_layer (dataset path from disk; refused in read-only mode) | selection (what the user selected: count + object ids per layer; with layer also its selected rows) | select (layer + where; method new|add|remove|and) | clear_selection (layer, or the whole map). The selection actions need add-in 0.1.7+."""
     return _dispatch("live_map", action, {
+        "selection": lambda: live.live_selection("get", layer, None, "new", fields, limit, map_name),
+        "select": lambda: _need(layer=layer) or live.live_selection("select", layer, where, method, None, limit, map_name),
+        "clear_selection": lambda: live.live_selection("clear", layer, None, "new", None, limit, map_name),
         "layers": lambda: live.live_list_layers(map_name),
         "query": lambda: _need(layer=layer) or live.live_query(layer, where, fields, limit),
         "zoom": lambda: _need(layer=layer) or live.live_zoom_to(layer, selection),
@@ -788,8 +792,37 @@ def live_map(action: str = "layers", map_name: str | None = None, layer: str | N
 
 @mcp.tool()
 def live_run_gp(tool: str, args: list[Any] | None = None, kwargs: dict | None = None, confirm: bool = False) -> dict:
-    """Run a geoprocessing tool LIVE inside Pro; output is added to the active map. Destructive: pass confirm=True (refused in read-only mode). Needs add-in 0.1.6+."""
+    """Run a geoprocessing tool LIVE inside Pro; output is added to the active map. Destructive: pass confirm=True (refused in read-only mode). Needs add-in 0.1.7+ (0.1.6 failed for every tool)."""
     return live.live_run_gp(tool, args, kwargs, confirm)
+
+
+@mcp.tool()
+def live_layer(layer: str, definition_query: str | None = None, visible: bool | None = None,
+               transparency: float | None = None, labels: dict | None = None, renderer: dict | None = None,
+               name: str | None = None, map_name: str | None = None, remove: bool = False) -> dict:
+    """A layer of the OPEN Pro map. With only `layer`: its info (geometry, source, count, count_shown, fields, definition query, renderer, labels). Otherwise change how it is SHOWN in the session the user is looking at (data untouched; pro_symbology edits the .aprx file instead, which Pro overwrites on save): definition_query ("" clears) | visible | transparency 0-100 | labels {"visible": true, "expression": "$feature.NAME"} (Arcade) | renderer {"type": "simple", "color": [r,g,b], "size"} / {"type": "unique", "field"} / {"type": "graduated", "field", "classes": 5, "color": [r,g,b], "to_color": [r,g,b]} | name | remove=true (out of the map; the data stays on disk). Needs add-in 0.1.7+; changes are refused in read-only mode."""
+    if not remove and all(v is None for v in (definition_query, visible, transparency, labels, renderer, name)):
+        return live.live_layer_info(layer, map_name)
+    return live.live_layer_set(layer, definition_query, visible, transparency, labels, renderer, name, map_name, remove)
+
+
+@mcp.tool()
+def live_edit(action: str = "features", layer: str | None = None, adds: list[dict] | None = None,
+              updates: list[dict] | None = None, deletes: list[int] | None = None, field: str | None = None,
+              field_type: str = "TEXT", expression: str | None = None, save: bool = False, confirm: bool = False,
+              map_name: str | None = None) -> dict:
+    """Edit a layer of the OPEN Pro map through Pro's own edit session, so it can stay in the Contents pane (pro_* tools run outside Pro and are locked out of it). features: adds [{"attributes": {...}, "geometry": {"x","y","wkid": 4326} or Esri JSON}], updates [{"object_id", "attributes", "geometry"}], deletes [object ids] in ONE undoable edit operation; unsaved unless save=true | add_field (field, field_type) | calculate (field, expression in Python, e.g. "!POP! / !AREA!"; confirm) | status (unsaved edits, undo stack) | undo | redo | save | discard. Deletes, calculate, save and discard need confirm=True (save/discard act on EVERY unsaved edit, the user's too). Refused in read-only mode. features/status/undo/save need add-in 0.1.7+."""
+    return _dispatch("live_edit", action, {
+        "features": lambda: _need(layer=layer) or live.live_edit_features(layer, adds, updates, deletes, save, confirm, map_name),
+        "add_field": lambda: _need(layer=layer, field=field) or live.live_run_gp("management.AddField", [layer, field, field_type], None, True),
+        "calculate": lambda: _need(layer=layer, field=field, expression=expression) or live.live_run_gp(
+            "management.CalculateField", [layer, field, expression, "PYTHON3"], None, confirm),
+        "status": lambda: live.live_edit_session("status", False, map_name),
+        "undo": lambda: live.live_edit_session("undo", False, map_name),
+        "redo": lambda: live.live_edit_session("redo", False, map_name),
+        "save": lambda: live.live_edit_session("save", confirm, map_name),
+        "discard": lambda: live.live_edit_session("discard", confirm, map_name),
+    })
 
 
 @mcp.tool()

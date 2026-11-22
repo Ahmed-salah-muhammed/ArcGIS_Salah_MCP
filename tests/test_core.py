@@ -3058,3 +3058,80 @@ def test_locked_op_reports_where_it_ran_and_a_failed_live_run(monkeypatch):
     monkeypatch.setattr(client, "post", lambda *a, **k: {"ok": False, "error": "GP tool failed: edits pending"})
     out = ops.add_field(r"C:\d.gdb\pts", "STATUS")
     assert out["code"] == "locked" and "edits pending" in out["error"]
+
+
+def test_a_toolbox_imported_on_its_own_gets_the_same_lock_handling(monkeypatch):
+    """unet / geoai import arcpy.un / arcpy.ia directly; wrap_toolbox gives them the run-inside-Pro fallback."""
+    import types
+
+    from arcgis_pro_salah_mcp.live import client
+    from arcgis_pro_salah_mcp.pro import locks, register
+
+    def trace(*_a, **_k):
+        raise RuntimeError("ERROR 160706: Cannot acquire a lock.")
+
+    un = types.SimpleNamespace(Trace=trace, TRACE_TYPES=("CONNECTED",))
+    sent = []
+    monkeypatch.setattr(register, "bridge_listening", lambda: True)
+    monkeypatch.setattr(client, "post", lambda command, params=None, timeout=30: sent.append(params) or {"ok": True, "data": {"outputs": []}})
+    wrapped = locks.wrap_toolbox(un, "un")
+    wrapped.Trace("net", "CONNECTED")
+    assert sent[0]["tool"] == "un.Trace" and sent[0]["args"] == ["net", "CONNECTED"]
+    assert wrapped.TRACE_TYPES == ("CONNECTED",) and locks.wrap_toolbox(wrapped, "un") is wrapped
+
+
+def test_live_edit_rails_before_anything_is_sent(monkeypatch):
+    from arcgis_pro_salah_mcp.config import CONFIG
+    from arcgis_pro_salah_mcp.live import client, ops as live_ops
+
+    sent = []
+    monkeypatch.setattr(CONFIG, "bridge_readonly", False)
+    monkeypatch.setattr(client, "post", lambda command, params=None, timeout=30: sent.append((command, params)) or {"ok": True, "data": {}})
+    assert live_ops.live_edit_features("pts")["code"] == "bad_argument"
+    assert live_ops.live_edit_features("pts", updates=[{"attributes": {"A": 1}}])["code"] == "bad_argument"
+    assert live_ops.live_edit_features("pts", deletes=[3, 4])["code"] == "confirm_required"
+    assert live_ops.live_edit_features("pts", adds=[{"attributes": {"A": 1}}], save=True)["code"] == "confirm_required"
+    assert live_ops.live_edit_session("discard")["code"] == "confirm_required"
+    assert live_ops.live_edit_session("explode")["code"] == "bad_action"
+    assert sent == []
+    assert live_ops.live_edit_features("pts", adds=[{"attributes": {"A": 1}, "geometry": {"x": 31, "y": 30}}])["ok"]
+    assert live_ops.live_edit_features("pts", deletes=[3], confirm=True)["ok"]
+    assert live_ops.live_edit_session("status")["ok"] and live_ops.live_edit_session("save", confirm=True)["ok"]
+    assert [c for c, _ in sent] == ["edit_features", "edit_features", "edit_session", "edit_session"]
+    assert sent[0][1]["adds"][0]["geometry"] == {"x": 31, "y": 30} and sent[1][1]["deletes"] == [3]
+
+    monkeypatch.setattr(CONFIG, "bridge_readonly", True)
+    assert live_ops.live_edit_features("pts", adds=[{"attributes": {}}])["code"] == "readonly"
+    assert live_ops.live_edit_session("undo")["code"] == "readonly"
+    assert live_ops.live_layer_set("pts", visible=False)["code"] == "readonly"
+    assert live_ops.live_edit_session("status")["ok"]          # reading the session is still allowed
+    assert live_ops.live_selection("select", "pts", "A > 1")["ok"]  # a selection changes no data
+
+
+def test_live_layer_and_selection_arguments(monkeypatch):
+    from arcgis_pro_salah_mcp.config import CONFIG
+    from arcgis_pro_salah_mcp.live import client, ops as live_ops
+
+    sent = []
+    monkeypatch.setattr(CONFIG, "bridge_readonly", False)
+    monkeypatch.setattr(client, "post", lambda command, params=None, timeout=30: sent.append((command, params)) or {"ok": True, "data": {}})
+    assert live_ops.live_layer_set("pts")["code"] == "bad_argument"
+    assert live_ops.live_layer_set("pts", transparency=140)["code"] == "bad_argument"
+    assert live_ops.live_layer_set("pts", renderer={"type": "heat"})["code"] == "bad_argument"
+    assert live_ops.live_layer_set("pts", renderer={"type": "unique"})["code"] == "bad_argument"
+    assert live_ops.live_selection("select")["code"] == "bad_argument"
+    assert sent == []
+    live_ops.live_layer_set("pts", definition_query="", labels={"expression": "$feature.NAME"}, renderer={"type": "Unique", "field": "KIND"})
+    assert sent[0] == ("layer_set", {"layer": "pts", "map": None, "definition_query": "",
+                                     "labels": {"expression": "$feature.NAME"}, "renderer": {"type": "unique", "field": "KIND"}})
+
+    from arcgis_pro_salah_mcp import server
+
+    sent.clear()
+    server._ORIGINAL_FN["live_layer"]("pts")                 # only the layer: its info
+    server._ORIGINAL_FN["live_layer"]("pts", visible=False)
+    server._ORIGINAL_FN["live_map"]("selection", layer="pts")
+    server._ORIGINAL_FN["live_edit"]("add_field", layer="pts", field="STATUS")
+    assert server._ORIGINAL_FN["live_edit"]("calculate", layer="pts", field="A", expression="1")["code"] == "confirm_required"
+    assert [c for c, _ in sent] == ["layer_info", "layer_set", "selection", "run_gp"]
+    assert sent[3][1] == {"tool": "management.AddField", "args": ["pts", "STATUS", "TEXT"], "kwargs": {}}

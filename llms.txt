@@ -1,6 +1,6 @@
 # ArcGIS Pro Salah MCP
 
-> MCP server (FastMCP, stdio) that lets an AI agent drive the Esri ArcGIS stack end to end: ArcPy geoprocessing on .aprx projects and geodatabases (`pro_*`), the OPEN ArcGIS Pro session through a .NET add-in (`live_*`), ArcGIS Online / Enterprise through the ArcGIS API for Python (`portal_*`, signed in through ArcGIS Pro automatically), and static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards (`webapp_*`). 72 tools in 14 toolsets, 23 resources (playbooks, live project, my content) + 1 resource template (one portal item) and 11 prompts. Every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}` (usually with a `code`).
+> MCP server (FastMCP, stdio) that lets an AI agent drive the Esri ArcGIS stack end to end: ArcPy geoprocessing on .aprx projects and geodatabases (`pro_*`), the OPEN ArcGIS Pro session through a .NET add-in (`live_*`), ArcGIS Online / Enterprise through the ArcGIS API for Python (`portal_*`, signed in through ArcGIS Pro automatically), and static ArcGIS Maps SDK for JavaScript 5.0 web apps and dashboards (`webapp_*`). 74 tools in 14 toolsets, 23 resources (playbooks, live project, my content) + 1 resource template (one portal item) and 11 prompts. Every tool returns `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}` (usually with a `code`).
 
 Key facts for an agent using these tools:
 
@@ -14,7 +14,7 @@ Key facts for an agent using these tools:
   `pro_server(action="status")` answers at once: warm-ups, what the ArcPy thread is doing, portal connections, jobs.
 - The server runs under ArcGIS Pro's own Python (`arcgispro-py3`). ArcPy cannot attach to a running ArcGIS Pro, so
   `pro_*` tools work on files on disk. `"CURRENT"` as a project path is resolved to the project open in Pro through
-  the live bridge. `live_*` needs ArcGIS Pro running with the SalahAIBridge add-in (0.1.6) on 127.0.0.1:2026.
+  the live bridge. `live_*` needs ArcGIS Pro running with the SalahAIBridge add-in (0.1.7) on 127.0.0.1:2026.
 - Portal tools sign in by themselves: the ArcGIS Pro sign-in first (`GIS("pro")`, Online or Enterprise, SSO
   included), then a profile, then `username` + `password_env`. `portal_connect(action="whoami")` shows the user,
   role and what it can do. Named connections (`connection="source"` / `"target"`) work across orgs.
@@ -43,7 +43,7 @@ Key facts for an agent using these tools:
 ## Toolsets
 
 - `core` (14 tools): everyday ArcPy on .aprx/.gdb files, one-call project context, pipelines, batches, background jobs, server status (always kept)
-- `live` (6 tools): the OPEN ArcGIS Pro session through the SalahAIBridge add-in
+- `live` (8 tools): the OPEN ArcGIS Pro session through the SalahAIBridge add-in
 - `egdb` (8 tools): enterprise geodatabases on SQL Server / PostgreSQL / Oracle: create, connect, users and privileges, versioning, archiving, replication, administration
 - `geoai` (5 tools): deep learning, vision-language and foundation models, interview-first notebook generator
 - `unet` (5 tools): Utility Network

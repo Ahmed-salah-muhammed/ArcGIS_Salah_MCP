@@ -23,15 +23,25 @@ from ..config import CONFIG
 
 # Reads and navigation: change no data, no map contents, no disk. Always allowed,
 # including in read-only mode. (``zoom_to`` only moves the camera.)
-READ_ONLY = frozenset({"ping", "list_layers", "query", "zoom_to"})
+# ``selection`` only changes what is highlighted, ``layer_info`` and the edit session's status only read.
+READ_ONLY = frozenset({"ping", "list_layers", "query", "zoom_to", "selection", "layer_info"})
 
 # Change data, the map's layers, or write to disk -> blocked in read-only mode.
-MUTATING = frozenset({"run_gp", "add_layer", "export_layout", "add_toolbox", "add_database"})
+MUTATING = frozenset({"run_gp", "add_layer", "export_layout", "add_toolbox", "add_database",
+                      "layer_set", "edit_features", "edit_session"})
 
 # Subset of MUTATING that can irreversibly overwrite/delete data -> need confirm.
 # ``run_gp`` runs an arbitrary geoprocessing tool (Delete, overwriting outputs,
 # editing in place), so it is the one that demands an explicit opt-in.
 DESTRUCTIVE = frozenset({"run_gp"})
+
+
+def needs_confirm(what: str, confirm: bool) -> dict | None:
+    """The ``confirm_required`` envelope for one risky part of a command (deleting rows, saving or discarding
+    the user's edit session), or ``None`` once the caller passed ``confirm=True``."""
+    if confirm:
+        return None
+    return err(f"{what}. Re-run with confirm=True to proceed.", code="confirm_required")
 
 
 def check(command: str, confirm: bool = False) -> dict | None:
