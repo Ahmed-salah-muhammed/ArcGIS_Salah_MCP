@@ -2960,3 +2960,101 @@ def test_stdio_guard_routes_prints_off_the_protocol_channel(monkeypatch, capsys)
     print("captured")
     router.buffers.pop(threading.get_ident())
     assert buf.getvalue() == "captured\n"
+
+
+# --- datasets locked by the open ArcGIS Pro session (pro/locks.py) ---------------------------------------
+
+class _FakeGP:
+    """arcpy.management with AddField(in_table, field_name, field_type=None, field_length=None) that is locked."""
+
+    def __init__(self, error):
+        self.error, self.calls = error, 0
+
+    def AddField(self, in_table=None, field_name=None, field_type=None, field_length=None):  # noqa: N802
+        self.calls += 1
+        raise RuntimeError(self.error)
+
+    def helper(self):
+        return "not a tool"
+
+
+def _locked_arcpy(error="ERROR 000464: Cannot get exclusive schema lock.  Either being edited or in use by another application or service."):
+    import types
+
+    return types.SimpleNamespace(management=_FakeGP(error), env=types.SimpleNamespace(workspace=None), ListFields=lambda *_a: [])
+
+
+def test_lock_errors_are_recognised_from_real_arcpy_messages():
+    from arcgis_pro_salah_mcp.pro.locks import is_lock_error
+
+    # the first two were produced by a real two-process arcpy run against a file geodatabase
+    assert is_lock_error("ERROR 000464: Cannot get exclusive schema lock.  Either being edited or in use by another application or service.")
+    assert is_lock_error("ERROR 160706: Cannot acquire a lock.")
+    assert is_lock_error("ERROR 000496: table is being edited")
+    assert not is_lock_error("ERROR 000732: Input Table: Dataset pts does not exist or is not supported")
+    assert not is_lock_error("ERROR 000012: NAME already exists")
+
+
+def test_locked_tool_runs_in_the_open_pro_session(monkeypatch):
+    from arcgis_pro_salah_mcp.live import client
+    from arcgis_pro_salah_mcp.pro import locks, register
+
+    sent = []
+    monkeypatch.setattr(register, "bridge_listening", lambda: True)
+    monkeypatch.setattr(client, "post", lambda command, params=None, timeout=30: sent.append((command, params, timeout))
+                        or {"ok": True, "data": {"tool": params["tool"], "outputs": [r"C:\d.gdb\pts"], "via": "UI thread"}})
+    arcpy = locks.lock_aware(_locked_arcpy())
+    result = arcpy.management.AddField(r"C:\d.gdb\pts", field_name="STATUS", field_length=50)
+    # named parameters become the positional list a GP tool takes; the skipped one is "" (its default)
+    assert sent == [("run_gp", {"tool": "management.AddField", "args": [r"C:\d.gdb\pts", "STATUS", "", 50], "kwargs": {}},
+                     locks.LIVE_TIMEOUT)]
+    assert result[0] == r"C:\d.gdb\pts" and result.outputCount == 1 and hasattr(result, "live")
+    assert arcpy.management.helper() == "not a tool"  # not a tool: passed through untouched
+    assert locks.lock_aware(arcpy) is arcpy
+
+
+def test_other_errors_and_unlocked_tools_never_reach_the_bridge(monkeypatch):
+    from arcgis_pro_salah_mcp.live import client
+    from arcgis_pro_salah_mcp.pro import locks, register
+
+    monkeypatch.setattr(register, "bridge_listening", lambda: True)
+    monkeypatch.setattr(client, "post", lambda *a, **k: pytest.fail("the bridge must not be called"))
+    arcpy = locks.lock_aware(_locked_arcpy("ERROR 000012: NAME already exists"))
+    with pytest.raises(RuntimeError, match="000012"):
+        arcpy.management.AddField("t", "NAME")
+    arcpy.env.workspace = r"C:\d.gdb"  # attributes still reach the real arcpy
+    assert arcpy.env.workspace == r"C:\d.gdb"
+
+
+def test_locked_without_a_bridge_or_in_read_only_mode_explains_what_to_do(monkeypatch):
+    from arcgis_pro_salah_mcp.config import CONFIG
+    from arcgis_pro_salah_mcp.live import client
+    from arcgis_pro_salah_mcp.pro import locks, ops, register
+
+    monkeypatch.setattr(register, "bridge_listening", lambda: False)
+    monkeypatch.setattr(ops, "_arcpy", lambda: locks.lock_aware(_locked_arcpy()))
+    out = ops.add_field(r"C:\d.gdb\pts", "STATUS")
+    assert out["ok"] is False and out["code"] == "locked" and "000464" in out["error"]
+    assert "SalahAIBridge" in out["hint"] and "remove the layer" in out["hint"]
+
+    monkeypatch.setattr(register, "bridge_listening", lambda: True)
+    monkeypatch.setattr(CONFIG, "bridge_readonly", True)
+    monkeypatch.setattr(client, "post", lambda *a, **k: pytest.fail("read-only: the bridge must not be called"))
+    out = ops.add_field(r"C:\d.gdb\pts", "STATUS")
+    assert out["code"] == "locked" and "read-only" in out["hint"]
+
+
+def test_locked_op_reports_where_it_ran_and_a_failed_live_run(monkeypatch):
+    from arcgis_pro_salah_mcp.config import CONFIG
+    from arcgis_pro_salah_mcp.live import client
+    from arcgis_pro_salah_mcp.pro import locks, ops, register
+
+    monkeypatch.setattr(CONFIG, "bridge_readonly", False)
+    monkeypatch.setattr(register, "bridge_listening", lambda: True)
+    monkeypatch.setattr(ops, "_arcpy", lambda: locks.lock_aware(_locked_arcpy()))
+    monkeypatch.setattr(client, "post", lambda *a, **k: {"ok": True, "data": {"outputs": ["x"]}})
+    out = ops.add_field(r"C:\d.gdb\pts", "STATUS")
+    assert out["ok"] is True and "open ArcGIS Pro session" in out["data"]["ran_in"]
+    monkeypatch.setattr(client, "post", lambda *a, **k: {"ok": False, "error": "GP tool failed: edits pending"})
+    out = ops.add_field(r"C:\d.gdb\pts", "STATUS")
+    assert out["code"] == "locked" and "edits pending" in out["error"]

@@ -297,7 +297,7 @@ Read a feature class/table: rows (attribute rows; where/order_by optional; geome
 - `layer_name: str | None = None`
 
 #### `pro_run_gp`
-Run ANY geoprocessing tool by dotted name, e.g. 'analysis.Buffer' / 'management.Dissolve'.
+Run ANY geoprocessing tool by dotted name, e.g. 'analysis.Buffer' / 'management.Dissolve'. A dataset locked by the open ArcGIS Pro (a layer in its map) is run inside that session automatically (result has ran_in); without the add-in the error has code 'locked'.
 
 - `tool: str`
 - `args: list[any] | None = None`

@@ -220,7 +220,7 @@ def pro_export(out_path: str, dataset: str | None = None, aprx_path: str = "CURR
 
 @mcp.tool()
 def pro_run_gp(tool: str, args: list[Any] | None = None, kwargs: dict | None = None) -> dict:
-    """Run ANY geoprocessing tool by dotted name, e.g. 'analysis.Buffer' / 'management.Dissolve'."""
+    """Run ANY geoprocessing tool by dotted name, e.g. 'analysis.Buffer' / 'management.Dissolve'. A dataset locked by the open ArcGIS Pro (a layer in its map) is run inside that session automatically (result has ran_in); without the add-in the error has code 'locked'."""
     return pro.run_gp(tool, args, kwargs)
 
 

@@ -159,6 +159,16 @@ Two-file pattern per layer: **`ops.py` does the work, `server.py` exposes it.**
   Keyword *prefix* matching, not substring ("age" must not match "acreage").
   Because it is pure it is unit-tested in `test_core.py` and also runs inside the
   publish script the ribbon shells out to.
+- `pro/locks.py` — **a dataset that is a layer in the open Pro map is locked for this process** (reported by the
+  user: they had to remove the layer from the Contents pane before `pro_*` edits). Reproduced with two arcpy
+  processes on a file gdb: AddField / DeleteField -> `ERROR 000464: Cannot get exclusive schema lock`,
+  CalculateField -> `ERROR 160706: Cannot acquire a lock`; reads are fine. `ops._arcpy()` returns
+  `lock_aware(arcpy)`: every `arcpy.<toolbox>.<Tool>` call that fails with a lock error is sent once to the
+  bridge's `run_gp` (named parameters turned positional with `inspect.signature`, skipped ones `""`, 900 s
+  timeout), where the lock is Pro's own; the op's result then carries `ran_in`. No bridge / read-only mode ->
+  `DatasetLocked` (`guard` returns `code="locked"` + `hint`). So `schema.py`, `validate.py` and `pipeline.py`
+  get it too (they use `ops._arcpy()`); `egdb`/`geoai`/`unet` import arcpy themselves and do not. The
+  no-bridge path was run with real arcpy; the run-inside-Pro path only against a fake bridge (Pro was closed).
 - `arcpy_thread.py` — **one thread owns arcpy** (the Python counterpart of Pro's MCT). Measured: with a
   PostgreSQL gdb, `arcpy.ListVersions` (ERROR 87395), `ArcSDESQLExecute` (ERROR 87413) and
   `arcpy.da.ListVersions` (TypeError(path)) fail on ANY thread other than the one that imported arcpy -
@@ -205,7 +215,9 @@ State & backend notes:
 ## The live bridge (`live_*` ⇄ SalahAIBridge)
 `docs/PROTOCOL.md` is authoritative for the wire contract — update it whenever
 you touch either side. `live/client.py` is stdlib-`urllib` only and **never
-raises**: transport failures come back as `err("bridge unreachable: …")`.
+raises**: transport failures come back as `err("bridge unreachable: …")`. It first probes the port with a
+0.25 s socket: with Pro closed urllib took **2.1 s** per call to report the refused connection (measured),
+now 0.28 s. `post(..., timeout=)` is 30 s by default and 900 s for `run_gp`.
 
 - **`live/policy.py` gates every mutating command client-side, before the HTTP
   request is sent.** Two rails: read-only mode (`ARCGIS_BRIDGE_READONLY` blocks
@@ -507,7 +519,7 @@ if you keep Pro somewhere non-standard.
 
 ## Tests
 `tests/test_core.py` must stay backend-free and green with **no ArcGIS installed**
-(139 tests; they also pass with `arcgis`/`arcpy` blocked from import). It covers the envelope/guard behavior, graceful ArcPy- and
+(144 tests; they also pass with `arcgis`/`arcpy` blocked from import). It covers the envelope/guard behavior, graceful ArcPy- and
 bridge-absent degradation, the `live/policy.py` rails, `pro/metadata.py` theme
 inference, both webapp generators, the cache (including the gdb-lock-file case
 and the TTL), pipeline placeholder substitution, the `.pyt` and `.atbx`

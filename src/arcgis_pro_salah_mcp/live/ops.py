@@ -63,6 +63,7 @@ def live_run_gp(
     return client.post(
         "run_gp",
         {"tool": tool, "args": args or [], "kwargs": kwargs or {}},
+        timeout=900,  # a geoprocessing tool can run far longer than the bridge's 30 s default
     )
 
 
